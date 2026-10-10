@@ -1,0 +1,51 @@
+[package]
+name = "lightcone-gallery"
+version = "0.1.0"
+description = "LightCone Gallery — 本地图库应用"
+authors = ["LightCone"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "lightcone_gallery_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `protocol-asset` 启用 asset:// 自定义协议，用于把本地图片文件直接交给 WebView 渲染
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# bundled: 随 crate 编译一份 SQLite 源码，无需系统预装 sqlite3
+rusqlite = { version = "0.40", features = ["bundled"] }
+walkdir = "2"
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "gif",
+    "webp",
+    "bmp",
+    "tiff",
+    "ico",
+] }
+thiserror = "2"
+
+# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# 图库缩略图生成是 CPU 密集的，调试期也给依赖开优化，否则首次索引会非常慢
+[profile.dev.package."*"]
+opt-level = 2

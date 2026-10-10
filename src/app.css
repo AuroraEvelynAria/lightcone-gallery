@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/* Tailwind v4 设计令牌：这里定义的颜色 / 字体会自动生成对应工具类 */
+@theme {
+  --font-sans:
+    "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+
+  --color-surface-950: oklch(0.17 0.012 265);
+  --color-surface-900: oklch(0.21 0.014 265);
+  --color-surface-850: oklch(0.24 0.015 265);
+  --color-surface-800: oklch(0.28 0.016 265);
+  --color-surface-700: oklch(0.35 0.018 265);
+  --color-surface-600: oklch(0.45 0.02 265);
+
+  --color-accent-400: oklch(0.79 0.15 212);
+  --color-accent-500: oklch(0.71 0.16 212);
+  --color-accent-600: oklch(0.62 0.16 212);
+
+  --radius-card: 0.75rem;
+}
+
+@layer base {
+  html,
+  body {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    @apply bg-surface-950 text-slate-200 font-sans;
+    /* 桌面应用观感：禁止橡皮筋滚动与整页拖动选中 */
+    overscroll-behavior: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  [data-selectable] {
+    user-select: text;
+  }
+
+  /* 细滚动条，避免默认滚动条破坏深色配色 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-700 rounded-full;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-surface-600;
+    background-clip: content-box;
+  }
+}
