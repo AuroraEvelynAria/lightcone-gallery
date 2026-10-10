@@ -1,18 +1,34 @@
 /**
  * 配色方案与窗口材质。
  *
- * **配色**取自 RhinE（foobar2000 主题）的 `tokens/tokens.json`
+ * **配色**源自 RhinE（foobar2000 主题）的 `tokens/tokens.json`
  * —— <https://github.com/ericzhang12111-cell/RhinE>
- * 5 个方案 × 明暗两套 × 15 个语义令牌。它那套词汇（bg / panel / case / well /
+ * 9 个方案 × 明暗两套 × 15 个语义令牌。它那套词汇（bg / panel / case / well /
  * hair / line-* / accent / on-accent）本来就是给「机箱陈列」这类工业界面设计的，
  * 正好对上我们要的观感，所以直接沿用，没有另起一套名字。
+ *
+ * 对 RhinE 原样的**两处偏离**（都是 2026-10-11 主人反馈后改的）：
+ * - FLARE 的浅色版原样把整面背景都做成了橙底（警示牌式的设计），当图库背景
+ *   没法用 —— 改成暖纸底，橙色列回强调位；深色版本就很好，保持原样。
+ * - 追加了 LAGOON / IRIS / BLOSSOM / CRIMSON 四套，补上青、紫、粉、红四个
+ *   色相。令牌结构照抄 ARCHIVE / COLD FRONT 的明暗两版套路。
  *
  * **材质**是 Tauri 的真实系统效果（DWM Mica / Acrylic / Tabbed），
  * 不是 CSS 假模糊。窗口必须 `transparent: true` 且 `html, body` 背景透明，
  * 否则材质被自己的底色盖住看不见。
  */
 
-export const SCHEME_IDS = ['archive', 'hazard', 'flare', 'field', 'front'] as const;
+export const SCHEME_IDS = [
+  'archive',
+  'hazard',
+  'flare',
+  'field',
+  'front',
+  'lagoon',
+  'iris',
+  'blossom',
+  'crimson',
+] as const;
 export type SchemeId = (typeof SCHEME_IDS)[number];
 
 /** 一个方案在某种明暗下的 15 个语义令牌。 */
@@ -138,21 +154,23 @@ export const SCHEMES: readonly Scheme[] = [
     id: "flare",
     name: "FLARE",
     light: {
-      bg: "#ff6b1a",
-      fg: "#060403",
-      "fg-soft": "#3b1f0f",
-      "text-muted": "#4a2610",
-      mark: "#87390f",
-      "line-dim": "#7a3810",
-      "line-faint": "#d25916",
-      hair: "#dc5c17",
-      panel: "#ff6e1b",
-      "panel-hi": "#ff711b",
-      case: "#f16519",
-      "case-hi": "#ff721c",
-      well: "#f16519",
-      accent: "#ffffff",
-      "on-accent": "#060403",
+      // 原样是整面橙底（RhinE 的警示牌设计），当图库背景没法用 —— 改成暖纸底，
+      // 让 FLARE 橙回到强调位。深色版没动。
+      bg: "#f5ece2",
+      fg: "#26170c",
+      "fg-soft": "#503a28",
+      "text-muted": "#6a594a",
+      mark: "#97897b",
+      "line-dim": "#94887a",
+      "line-faint": "#d3c6b7",
+      hair: "#ddd1c2",
+      panel: "#fbf3e9",
+      "panel-hi": "#fff9f0",
+      case: "#ecdfd0",
+      "case-hi": "#fff8ec",
+      well: "#ecdfd0",
+      accent: "#ff6b1a",
+      "on-accent": "#1c0d02",
     },
     dark: {
       bg: "#140a05",
@@ -246,6 +264,158 @@ export const SCHEMES: readonly Scheme[] = [
       well: "#0e1116",
       accent: "#3d8bff",
       "on-accent": "#070a0f",
+    },
+  },
+  {
+    id: "lagoon",
+    name: "LAGOON",
+    light: {
+      bg: "#e6efed",
+      fg: "#0f2523",
+      "fg-soft": "#374f4c",
+      "text-muted": "#4f6663",
+      mark: "#7e918e",
+      "line-dim": "#7d8f8c",
+      "line-faint": "#c0cfcc",
+      hair: "#cbd8d5",
+      panel: "#edf5f3",
+      "panel-hi": "#f2fbf9",
+      case: "#d9e5e2",
+      "case-hi": "#effaf8",
+      well: "#d9e5e2",
+      accent: "#0e9188",
+      "on-accent": "#eaf6f4",
+    },
+    dark: {
+      bg: "#060c0b",
+      fg: "#e0efec",
+      "fg-soft": "#a3bcb8",
+      "text-muted": "#7b918d",
+      mark: "#7d8683",
+      "line-dim": "#5a6e6a",
+      "line-faint": "#313b39",
+      hair: "#2a3331",
+      panel: "#0a1211",
+      "panel-hi": "#101a18",
+      case: "#121d1b",
+      "case-hi": "#22302d",
+      well: "#0b1312",
+      accent: "#2ed3c3",
+      "on-accent": "#06110f",
+    },
+  },
+  {
+    id: "iris",
+    name: "IRIS",
+    light: {
+      bg: "#ece9f3",
+      fg: "#1d1730",
+      "fg-soft": "#443c5e",
+      "text-muted": "#5c5474",
+      mark: "#8a84a0",
+      "line-dim": "#867f9c",
+      "line-faint": "#cbc5da",
+      hair: "#d3cee0",
+      panel: "#f3f0f9",
+      "panel-hi": "#f9f6fe",
+      case: "#e1dcea",
+      "case-hi": "#f8f4ff",
+      well: "#e1dcea",
+      accent: "#7c3aed",
+      "on-accent": "#f3f0f9",
+    },
+    dark: {
+      bg: "#0a0813",
+      fg: "#eae6f6",
+      "fg-soft": "#b5aecb",
+      "text-muted": "#8a83a1",
+      mark: "#858190",
+      "line-dim": "#645d7e",
+      "line-faint": "#363249",
+      hair: "#2f2b40",
+      panel: "#0f0d1a",
+      "panel-hi": "#161327",
+      case: "#151225",
+      "case-hi": "#272242",
+      well: "#0d0b16",
+      accent: "#a78bfa",
+      "on-accent": "#0a0813",
+    },
+  },
+  {
+    id: "blossom",
+    name: "BLOSSOM",
+    light: {
+      bg: "#f4eaee",
+      fg: "#2c151f",
+      "fg-soft": "#563a47",
+      "text-muted": "#6f545f",
+      mark: "#9d8791",
+      "line-dim": "#99818c",
+      "line-faint": "#d9c7cf",
+      hair: "#e1d1d8",
+      panel: "#faf0f4",
+      "panel-hi": "#fff5f9",
+      case: "#ecdbe2",
+      "case-hi": "#fff3f8",
+      well: "#ecdbe2",
+      accent: "#d6336c",
+      "on-accent": "#fdf2f6",
+    },
+    dark: {
+      bg: "#120a0e",
+      fg: "#f5e7ed",
+      "fg-soft": "#c5a9b5",
+      "text-muted": "#947f8a",
+      mark: "#8d8087",
+      "line-dim": "#745e69",
+      "line-faint": "#3e3239",
+      hair: "#362b31",
+      panel: "#180f13",
+      "panel-hi": "#201519",
+      case: "#1f1218",
+      "case-hi": "#312329",
+      well: "#140c10",
+      accent: "#f0679e",
+      "on-accent": "#120a0e",
+    },
+  },
+  {
+    id: "crimson",
+    name: "CRIMSON",
+    light: {
+      bg: "#f2eaea",
+      fg: "#2b1416",
+      "fg-soft": "#583a3c",
+      "text-muted": "#715759",
+      mark: "#9d888a",
+      "line-dim": "#988284",
+      "line-faint": "#dccacb",
+      hair: "#e3d2d3",
+      panel: "#f9f0f0",
+      "panel-hi": "#fff5f5",
+      case: "#eadbdc",
+      "case-hi": "#fff3f4",
+      well: "#eadbdc",
+      accent: "#d22638",
+      "on-accent": "#fdf2f3",
+    },
+    dark: {
+      bg: "#100809",
+      fg: "#f5e6e7",
+      "fg-soft": "#c7a9ab",
+      "text-muted": "#968082",
+      mark: "#8e8183",
+      "line-dim": "#776062",
+      "line-faint": "#403234",
+      hair: "#382c2e",
+      panel: "#170d0e",
+      "panel-hi": "#1f1314",
+      case: "#1e1213",
+      "case-hi": "#2f2223",
+      well: "#120a0b",
+      accent: "#ef4655",
+      "on-accent": "#100809",
     },
   },
 ];

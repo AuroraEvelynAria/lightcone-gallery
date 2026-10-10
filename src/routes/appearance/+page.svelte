@@ -2,7 +2,7 @@
   /**
    * 外观：配色方案 × 窗口材质 × 明暗，三个正交的轴。
    *
-   * 配色取自 RhinE（foobar2000 主题）的 5 套方案；材质是 Tauri 的真实系统效果
+   * 配色源自 RhinE（foobar2000 主题）的 5 套方案，另按主人反馈新增了 4 套；材质是 Tauri 的真实系统效果
    * （DWM Mica / Acrylic），不是 CSS 假模糊。切换即时生效，不需要重启。
    */
   import { theme } from "$lib/theme.svelte";
@@ -75,7 +75,7 @@
           <h2 class="font-mono text-[11px] font-semibold tracking-wide text-muted uppercase">
             配色方案
           </h2>
-          <p class="text-[11px] text-mark">5 套，各自带浅色与深色两版</p>
+          <p class="text-[11px] text-mark">{SCHEMES.length} 套，各自带浅色与深色两版</p>
         </div>
         <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {#each SCHEMES as scheme (scheme.id)}
