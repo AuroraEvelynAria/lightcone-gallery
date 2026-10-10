@@ -81,13 +81,14 @@ export const api = {
   // ---- 外观（阶段三）------------------------------------------------------
   /**
    * 应用窗口材质。`material` 取 `solid` / `mica` / `acrylic` / `tabbed` / `blur`，
-   * `dark` 用来选材质的明暗变体（只有 Mica / Tabbed 提供）。
+   * `dark` 用来选材质的明暗变体（只有 Mica / Tabbed 提供），
+   * `tint` 是染色（`#rrggbb`，只有 Acrylic / Blur 吃）。
    *
    * 注意：底层 `window_vibrancy` 的错误被 Tauri 丢掉了，所以不支持的平台上
    * 这个调用会「成功」但什么也没发生 —— 平台要求由前端标注，不假装能检测。
    */
-  setWindowMaterial: (material: string, dark: boolean) =>
-    invoke<void>("set_window_material", { material, dark }),
+  setWindowMaterial: (material: string, dark: boolean, tint?: string) =>
+    invoke<void>("set_window_material", { material, dark, tint: tint ?? null }),
   /** 读取全部键值设置。数据库是外观偏好的权威来源，localStorage 只作首帧缓存。 */
   loadSettings: () => invoke<Record<string, string>>("load_settings"),
   /** 写入若干键值设置（同名的键直接覆盖）。 */

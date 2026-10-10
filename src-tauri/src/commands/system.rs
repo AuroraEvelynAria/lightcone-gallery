@@ -61,6 +61,10 @@ pub async fn clear_thumbnail_cache(state: State<'_, AppState>) -> AppResult<()> 
 /// `dark` 用来选材质的明暗变体：只有 Mica / Tabbed 提供了显式的明暗变体，
 /// 若只传 `Effect::Mica` 它会跟随**系统**偏好，跟应用自己的明暗设置对不上。
 ///
+/// `tint` 是材质染色（`#rrggbb`），**只有 Acrylic / Blur 吃这个参数**。
+/// 这两个材质本身几乎不挡壁纸，实测在浅色壁纸下会把深色方案冲淡到读不清字，
+/// 所以要用配色方案自己的底色染一遍。
+///
 /// **平台限制**：Mica / Tabbed 需要 Windows 11（build ≥ 22000），Acrylic 需要
 /// Windows 10 v1809+，Blur 在 Windows 11 22621 上拖动窗口会明显卡顿。
 ///
@@ -72,8 +76,10 @@ pub async fn set_window_material(
     window: tauri::WebviewWindow,
     material: String,
     dark: bool,
+    tint: Option<String>,
 ) -> AppResult<()> {
-    use tauri::window::{Effect, EffectsBuilder};
+    use tauri::utils::config::WindowEffectsConfig;
+    use tauri::window::{Color, Effect, EffectsBuilder};
 
     let effect = match material.as_str() {
         "solid" => None,
@@ -90,8 +96,24 @@ pub async fn set_window_material(
         }
     };
 
+    let config: Option<WindowEffectsConfig> = match effect {
+        None => None,
+        Some(effect) => {
+            let mut builder = EffectsBuilder::new().effect(effect);
+            if matches!(effect, Effect::Acrylic | Effect::Blur)
+                && let Some(tint) = tint.as_deref()
+            {
+                builder = builder.color(
+                    tint.parse::<Color>()
+                        .map_err(|err| AppError::InvalidInput(format!("材质染色格式不对: {err}")))?,
+                );
+            }
+            Some(builder.build())
+        }
+    };
+
     window
-        .set_effects(effect.map(|effect| EffectsBuilder::new().effect(effect).build()))
+        .set_effects(config)
         .map_err(|err| AppError::Other(format!("应用窗口材质失败: {err}")))
 }
 

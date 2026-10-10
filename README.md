@@ -14,6 +14,7 @@
 | 样式 | Tailwind CSS 4 | 走 `@tailwindcss/vite` 插件，无需 `tailwind.config.js` |
 | 数据库 | SQLite + rusqlite | `bundled` 特性内嵌 SQLite 源码，用户机器无需装 sqlite3 |
 | 图像处理 | `image` + `webp` | `image` 负责解码与缩放，`webp`（libwebp 绑定）负责**有损** WebP 编码 |
+| 外观 | RhinE 配色 + DWM 材质 | 配色取自 RhinE 的 5 套方案；材质是 Windows 原生 Mica / Acrylic |
 ## 环境要求
 
 - **Node.js** ≥ 20
@@ -53,6 +54,8 @@ cd src-tauri && cargo test   # 后端测试
 │  │  ├─ types.ts                # 与 Rust models.rs 对齐的类型定义
 │  │  ├─ gallery.svelte.ts       # 通用图库的全局状态（Svelte 5 runes）
 │  │  ├─ artworks.svelte.ts      # 作品列表的分块窗口缓存（按需拉取）
+│  │  ├─ themes.ts               # 配色方案与材质定义（由 RhinE 的 tokens.json 生成）
+│  │  ├─ theme.svelte.ts         # 外观三轴状态（配色 × 材质 × 明暗）
 │  │  ├─ virtualGeometry.ts      # 定高网格的几何推导（纯函数，可脱离浏览器测）
 │  │  ├─ thumbnailQueue.ts       # 缩略图请求的并发闸门
 │  │  ├─ format.ts               # 展示层格式化
@@ -70,6 +73,7 @@ cd src-tauri && cargo test   # 后端测试
 │  └─ routes/
 │     ├─ +layout.svelte
 │     ├─ +page.svelte            # 通用图库（网格 / 搜索 / 标签 / 相册）
+│     ├─ appearance/+page.svelte # 外观（配色 / 材质 / 明暗）
 │     └─ artworks/+page.svelte   # 作品库（PID 维度，虚拟滚动缩略图网格）
 ├─ tests/
 │  └─ virtual-geometry.test.ts   # 虚拟滚动几何自检（npm test）
@@ -150,6 +154,7 @@ cd src-tauri && cargo test   # 后端测试
 | 相册 | `list_albums` `create_album` `rename_album` `delete_album` `add_images_to_album` `remove_images_from_album` `set_album_cover` |
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
+| 外观（阶段三） | `set_window_material` `load_settings` `save_settings` |
 | 作品（阶段一 / 二） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
@@ -188,12 +193,27 @@ cd src-tauri && cargo test   # 后端测试
 
 **虚拟滚动的复用陷阱**：格子按索引作 key，`Thumbnail` 会拿到新 `id` 却沿用旧实例。因此它在 `id` 变化时会清空 `source` / `failed` / `requestedId`，并用「请求期间 id 是否又被换掉」丢弃过期响应。另外 `VirtualGrid` 的格子带 `data-index`——虚拟滚动的 DOM 没有位置语义，这是唯一能把节点和数据下标对上的凭据。
 
+**外观：三个正交的轴**（阶段三）。配色 × 材质 × 明暗，三者互不耦合。
+
+- **配色**取自 [RhinE](https://github.com/ericzhang12111-cell/RhinE)（一个 foobar2000 主题）的 `tokens/tokens.json`：5 套方案（ARCHIVE / HAZARD / FLARE / FIELD / COLD FRONT）× 明暗两版 × 15 个语义令牌，共 150 个色值。它那套词汇（`bg` / `panel` / `case` / `well` / `hair` / `line-*` / `accent` / `on-accent`）本来就是给「机箱陈列」这类工业界面设计的，直接沿用没有另起名字。`src/lib/themes.ts` 由脚本从该 JSON 生成，不是手抄。
+- **材质**是 Tauri 的真实系统效果（DWM），不是 CSS 假模糊：`Effect::Mica` / `Acrylic` / `Tabbed` / `Blur`。窗口必须 `transparent: true` 且 `html` 背景透明，材质才不会被自己的底色盖住；材质生效时应用底色与面板按 `--alpha-*` 让出透明度。
+- **明暗**只影响配色，不影响材质；材质本身有明暗变体的（Mica / Tabbed）由应用显式指定，不交给系统偏好决定。
+
+**令牌层**：`app.css` 里的 `--color-*` 全部指向运行时写入的 `--tone-*` 自定义属性。换配色只改这 15 个属性，Tailwind 生成的所有工具类跟着变，组件一行都不用动。前景层次按「强调度」编号（`text-fg` 最强 → `text-mark` 最弱）而不是明度，所以浅色方案里 fg 是深色、深色方案里 fg 是浅色，组件不必知道自己在哪种模式下。
+
+**材质染色**：只有 Acrylic / Blur 吃 `tint` 参数。这两个材质几乎不挡壁纸 —— 实测在浅色壁纸下会把深色方案冲淡到读不清字，所以用配色方案自己的底色染一遍。
+
+**外观偏好的两条持久化路径**：数据库 `settings` 表是**权威来源**（WebView 的 localStorage 会被清缓存顺手清掉，用户挑的外观不该跟着消失）；localStorage 只作**首帧缓存**，构造时同步读一次并立刻落到 DOM 上，页面第一帧就是用户选的样子。读取时对取值做校验（`isSchemeId` 等），免得以后删掉某个方案后旧设置把界面指到一个不存在的配色上。
+
 **SQL 注入防护**：筛选条件全部走 `?` 占位符 + `Vec<Value>` 绑定；排序字段通过 `SortBy::column()` 的白名单映射落地，不拼接前端传来的字符串。
 
 **退出时 checkpoint**：Tauri 的退出路径会直接结束进程、跳过 Rust 析构，`Connection` 不会走 `Drop`，WAL 也就永远合并不回主库（实测退出后主库仍停在 4096 字节、WAL 有 156 KB）。因此 `lib.rs` 用 `app.run(|handle, event| ...)` 捕获 `RunEvent::Exit`，在退出前显式执行 `PRAGMA wal_checkpoint(TRUNCATE)`。这样主库文件始终是自洽的——单独备份 `gallery.db` 不会丢数据。
 
 ## 已知限制与扩展点
 
+- **材质是否生效无法检测**：Tauri 的 `apply_effects` 把底层 `window_vibrancy` 的返回值整个丢掉了（见 `tauri/src/vibrancy/windows.rs`），所以不支持的平台上 `set_window_material` 会「成功」但什么也没发生。外观页把平台要求直接标在选项旁，不假装能检测。Mica / Tabbed 需要 Windows 11，Acrylic 需要 Windows 10 v1809+。
+- **「模糊」材质没有实测**：另外四种（纯色 / 云母 / 亚克力 / 标签页）已在真机窗口逐一确认；Blur 是同一个代码路径，但 Windows 11 22621 上拖动窗口会明显卡顿（Tauri 的类型注释里也写了），所以没细看。
+- **语义状态色还没进配色体系**：错误 / 警告用的是 Tailwind 的 `rose` / `amber`，不随配色方案变化。浅色方案下 `bg-rose-950/60` 这种深底会显得突兀，后续应该抽成 `danger` / `warn` 两个令牌。
 - **EXIF 尚未解析**：`images.taken_at` 字段已预留但当前为 `NULL`，排序回退到文件修改时间。接入 `kamadak-exif` 后写入该列即可启用「按拍摄时间排序」。
 - **HEIC / RAW 无法索引**：`image` crate 只启用了 jpeg / png / gif / webp / bmp / tiff / ico。扫描时这些文件会计入 `skipped` 而不是被静默丢弃。要支持需更换解码后端（如 `libheif-rs`）。
 - **换成 WebP 后旧缓存会变孤儿**：缓存路径从 `<尺寸>/<id>.jpg` 改成 `<归属域>/<尺寸>/<id>.webp`，旧 JPEG 不会再被读取，但会留在磁盘上。侧栏底部的「清理」按钮可以一次性清掉，下次浏览按需重建。

@@ -181,7 +181,9 @@ class ThemeStore {
     this.#applied = key;
 
     try {
-      await api.setWindowMaterial(this.material, this.dark);
+      // 把方案底色当染色传过去：亚克力/模糊太透，不染的话浅色壁纸会把
+      // 深色方案冲淡到读不清字（真机实测）
+      await api.setWindowMaterial(this.material, this.dark, this.palette.bg);
       this.error = null;
     } catch (err) {
       this.error = String(err);
