@@ -8,6 +8,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   Album,
+  Artwork,
+  ArtworkPage,
+  ArtworkScanSummary,
   CacheUsage,
   Image,
   ImageDetail,
@@ -70,6 +73,27 @@ export const api = {
   stats: () => invoke<Stats>("library_stats"),
   thumbnailCacheUsage: () => invoke<CacheUsage>("thumbnail_cache_usage"),
   clearThumbnailCache: () => invoke<void>("clear_thumbnail_cache"),
+
+  // ---- 作品（阶段一：Pixiv 维度）------------------------------------------
+  /** 扫描一个本地文件夹，解析 `{pid}_p{num}` 后写入 artworks 表 */
+  scanArtworksFolder: (path: string) =>
+    invoke<ArtworkScanSummary>("scan_artworks_folder", { path }),
+  /** 分页读取作品列表：从第 offset 条开始返回 limit 条 */
+  listArtworks: (offset = 0, limit = 60) =>
+    invoke<ArtworkPage>("list_artworks", { offset, limit }),
 };
 
-export type { Image, ImageDetail, ImageQuery, Library, PagedImages, SortBy, Stats, Tag, Album };
+export type {
+  Album,
+  Artwork,
+  ArtworkPage,
+  ArtworkScanSummary,
+  Image,
+  ImageDetail,
+  ImageQuery,
+  Library,
+  PagedImages,
+  SortBy,
+  Stats,
+  Tag,
+};

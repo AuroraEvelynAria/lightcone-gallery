@@ -110,3 +110,37 @@ export interface CacheUsage {
   bytes: number;
   files: number;
 }
+
+// ---------------------------------------------------------------------------
+// 阶段一：作品（Pixiv）维度
+// ---------------------------------------------------------------------------
+
+/** 一行代表「某作品的某一页」，文件名形如 `{pid}_p{num}.jpg`。 */
+export interface Artwork {
+  id: number;
+  pid: string;
+  filePath: string;
+  /** 文件名里的 `_p{num}` */
+  page: number;
+  createdAt: number;
+}
+
+export interface ArtworkPage {
+  items: Artwork[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface ArtworkScanSummary {
+  /** 目录里发现的图片文件总数 */
+  discovered: number;
+  /** 文件名符合 `{pid}_p{num}` 的数量 */
+  matched: number;
+  /** 实际写入的行数 */
+  inserted: number;
+  /** 因 (pid, page) 已存在而被去重掉的数量 */
+  duplicates: number;
+  /** 命名不符合规范、未收进作品库的数量 */
+  skipped: number;
+}

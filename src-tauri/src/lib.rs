@@ -2,6 +2,7 @@
 //!
 //! 启动流程：定位 app data 目录 -> 打开并迁移 SQLite -> 恢复 asset:// 目录授权 -> 注册命令。
 
+mod artworks;
 mod commands;
 mod db;
 mod error;
@@ -83,6 +84,9 @@ pub fn run() {
             commands::library_stats,
             commands::thumbnail_cache_usage,
             commands::clear_thumbnail_cache,
+            // 阶段一：作品（Pixiv）维度
+            commands::scan_artworks_folder,
+            commands::list_artworks,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

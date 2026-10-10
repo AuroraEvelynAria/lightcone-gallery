@@ -36,7 +36,7 @@ pub fn is_supported_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn should_descend(entry: &walkdir::DirEntry) -> bool {
+pub(crate) fn should_descend(entry: &walkdir::DirEntry) -> bool {
     if !entry.file_type().is_dir() || entry.depth() == 0 {
         return true;
     }

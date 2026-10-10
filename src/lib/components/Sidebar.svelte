@@ -76,6 +76,12 @@
         <span>收藏</span>
         {#if gallery.stats}<span class="count">{gallery.stats.favorites}</span>{/if}
       </button>
+
+      <!-- 阶段一新增：作品（PID）维度页面 -->
+      <a href="/artworks" class="sidebar-item">
+        <span>作品库 (PID)</span>
+        <span class="count">↗</span>
+      </a>
     </div>
 
     <!-- 图库 -->

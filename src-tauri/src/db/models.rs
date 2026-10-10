@@ -279,6 +279,58 @@ pub struct ScanSummary {
 }
 
 // ---------------------------------------------------------------------------
+// 作品（阶段一：Pixiv 维度的索引）
+// ---------------------------------------------------------------------------
+
+/// 一行代表「某作品的某一页」。文件名形如 `{pid}_p{num}.jpg`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Artwork {
+    pub id: i64,
+    pub pid: String,
+    pub file_path: String,
+    /// 文件名里的 `_p{num}`
+    pub page: i64,
+    pub created_at: i64,
+}
+
+impl Artwork {
+    pub fn from_row(row: &Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            id: row.get("id")?,
+            pid: row.get("pid")?,
+            file_path: row.get("file_path")?,
+            page: row.get("page")?,
+            created_at: row.get("created_at")?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtworkPage {
+    pub items: Vec<Artwork>,
+    pub total: i64,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtworkScanSummary {
+    /// 目录里发现的图片文件总数
+    pub discovered: usize,
+    /// 文件名符合 `{pid}_p{num}` 的数量
+    pub matched: usize,
+    /// 实际写入的行数
+    pub inserted: usize,
+    /// 因 (pid, page) 已存在而被去重掉的数量
+    pub duplicates: usize,
+    /// 命名不符合规范、未收进作品库的数量
+    pub skipped: usize,
+}
+
+// ---------------------------------------------------------------------------
 // 输入校验
 // ---------------------------------------------------------------------------
 
