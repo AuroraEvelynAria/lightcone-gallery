@@ -24,6 +24,8 @@
         return current.kind === "artist" && current.uid === target.uid;
       case "pixivTag":
         return current.kind === "pixivTag" && current.tag === target.tag;
+      case "artworks":
+        return current.kind === "artworks";
     }
   }
 
@@ -89,11 +91,15 @@
         {#if gallery.stats}<span class="count">{gallery.stats.favorites}</span>{/if}
       </button>
 
-      <!-- 阶段一新增：作品（PID）维度页面 -->
-      <a href="/artworks" class="sidebar-item">
+      <!-- 作品（PID）维度：与上面两项同款的原地切换，不再是独立页面 -->
+      <button
+        type="button"
+        class="sidebar-item"
+        class:sidebar-item-active={isActive({ kind: "artworks" })}
+        onclick={() => gallery.select({ kind: "artworks" })}
+      >
         <span>作品库 (PID)</span>
-        <span class="count">↗</span>
-      </a>
+      </button>
 
       <!-- 阶段三新增：外观（配色 / 材质 / 明暗） -->
       <a href="/appearance" class="sidebar-item">

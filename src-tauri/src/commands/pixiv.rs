@@ -15,7 +15,8 @@
 //! 另外：这个端点**不需要也不该带 refresh_token**，所以不存在「认证失败还继续撞」
 //! 那条最危险的路 —— 最坏情况就是被限流。
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -169,6 +170,19 @@ pub async fn fetch_all_meta(app: AppHandle, state: State<'_, AppState>) -> AppRe
         ));
     }
 
+    // 复位交给 Drop 守卫：下面循环里的 `?`（数待补全、跑批次 —— 落库随时可能
+    // 撞上磁盘满 / IO 错误）会带着错误**提前返回**，走不到循环后面的复位语句；
+    // 标志一旦卡在 true，自动补全从此报「已经在跑」，而前端此刻已经收起
+    // 「停止」按钮 —— 除了重启应用没有出路。挂进 Drop 就没有「哪条路径忘了
+    // 复位」这回事。
+    struct ResetRunningOnDrop(Arc<AtomicBool>);
+    impl Drop for ResetRunningOnDrop {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let _running = ResetRunningOnDrop(Arc::clone(&state.meta_running));
+
     let started = std::time::Instant::now();
     let mut total = MetaBatch::default();
     let mut since_cooldown = 0usize;
@@ -196,8 +210,10 @@ pub async fn fetch_all_meta(app: AppHandle, state: State<'_, AppState>) -> AppRe
         )
         .await?;
 
-        // 一条都没处理（理论上不会发生，保险起见别死循环）
+        // 一条都没处理：「停止」正好落在批次切换的间隙、或者待补全刚好被抓完，
+        // 都会走到这里。别把前者上报成「正常完成」—— stopped 要如实带出去。
         if batch.fetched + batch.missing + batch.failed == 0 {
+            total.stopped |= batch.stopped;
             break Ok(total);
         }
 
@@ -232,7 +248,7 @@ pub async fn fetch_all_meta(app: AppHandle, state: State<'_, AppState>) -> AppRe
         }
     };
 
-    state.meta_running.store(false, Ordering::SeqCst);
+    // meta_running 的复位在上面 Drop 守卫里，函数从哪条路径出去都会执行。
     if let Ok(mut summary) = result {
         summary.elapsed_secs = started.elapsed().as_secs();
         Ok(summary)

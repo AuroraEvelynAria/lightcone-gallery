@@ -118,6 +118,7 @@
       {onclose}
       {onnavigate}
       onfullscreen={(value) => (immersive = value)}
+      onrate={(rating) => gallery.setRating(image, image.rating === rating ? 0 : rating)}
     >
       <!--
         照片下面展示的是**这幅画在 Pixiv 上的信息**，不是本地文件名 ——
@@ -201,7 +202,7 @@
             {#each [1, 2, 3, 4, 5] as star (star)}
               <button
                 type="button"
-                class="cursor-pointer p-0.5"
+                class="cursor-pointer p-1 transition-transform active:scale-90"
                 aria-label={`评 ${star} 星`}
                 onclick={() => gallery.setRating(image, star === image.rating ? 0 : star)}
               >

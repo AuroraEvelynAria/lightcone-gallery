@@ -101,6 +101,8 @@
     onnavigate?: (delta: number) => void;
     /** 全屏状态变化。父组件据此收起侧边信息面板 */
     onfullscreen?: (value: boolean) => void;
+    /** 数字键 1-5 直接评分。不传就不响应数字键 */
+    onrate?: (rating: number) => void;
     /** 加载失败时展示的路径，方便主人自己去磁盘上找 */
     failurePath?: string;
     /** 原图在磁盘上的路径。给了就在工具条上多一个「复制图片」按钮 */
@@ -115,6 +117,7 @@
     onclose,
     onnavigate,
     onfullscreen,
+    onrate,
     failurePath,
     copyPath,
   }: Props = $props();
@@ -506,6 +509,12 @@
     pressedOnPhoto = event.target instanceof HTMLImageElement;
     // 每次按下都重新计一次「这次算不算拖拽」
     dragged = 0;
+    // 按在按钮 / 链接上（翻页箭头、meta 行的画师名等）不进入拖拽：下面的
+    // `setPointerCapture` 会把随后的 click 重定向到舞台，控件自己的 onclick
+    // 就永远收不到了 —— 工具条用 stopPropagation 挡住了这一手（见标记处），
+    // 箭头和 meta 行是舞台的子孙、没有挡，放大态点它们会「毫无反应」。
+    // 非放大态本来就不捕获，这行提前返回不影响任何行为。
+    if (event.target instanceof Element && event.target.closest("button, a")) return;
     if (!zoomed || event.button !== 0) return;
     dragging = true;
     dragStart = { x: event.clientX, y: event.clientY, tx, ty };
@@ -702,6 +711,14 @@
           break;
         case "0":
           resetZoom();
+          break;
+        case "1":
+        case "2":
+        case "3":
+        case "4":
+        case "5":
+          // 数字键直接评分 —— 表单控件里的输入已被上面的 typing 守卫拦下
+          onrate?.(Number(event.key));
           break;
         case "f":
         case "F":
@@ -1213,6 +1230,12 @@
     background: color-mix(in oklab, var(--tone-accent) 12%, transparent);
   }
 
+  /* 标题带 data-selectable：恢复指针事件，让它能选中复制 —— 也顺手治好
+     「点标题会关弹窗」（没有这一层，点击会穿透到 inner 被判成空白） */
+  .viewer__meta :global([data-selectable]) {
+    pointer-events: auto;
+  }
+
   .viewer__meta :global(.viewer-caption) {
     min-width: 0;
     max-width: 60vw;
@@ -1238,12 +1261,19 @@
     backdrop-filter: blur(4px);
     transition:
       background 0.15s,
-      color 0.15s;
+      color 0.15s,
+      opacity 0.2s;
+  }
+
+  /* 放大是看细节的时刻：箭头淡到三成、悬停恢复 —— 别压在画面上 */
+  .viewer.is-zoomed .viewer__nav {
+    opacity: 0.3;
   }
 
   .viewer__nav:hover {
     background: rgb(0 0 0 / 0.72);
     color: white;
+    opacity: 1;
   }
 
   /* ---- 底部工具条 ---------------------------------------------------- */

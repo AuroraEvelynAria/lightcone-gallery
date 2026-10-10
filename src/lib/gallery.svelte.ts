@@ -35,7 +35,12 @@ export type Selection =
    * 按 Pixiv 官方标签筛选。标签来自联网补全的元数据，与主人自己打的标签
    * （`kind: "tag"`，挂在 `image_tags` 上）是两套东西，不要混。
    */
-  | { kind: "pixivTag"; tag: string };
+  | { kind: "pixivTag"; tag: string }
+  /**
+   * 作品库（PID 维度）。它不是 `images` 表的筛选条件，而是把内容区整个
+   * 换成作品库视图 —— 与「全部图片 / 收藏」同款的侧栏原地切换。
+   */
+  | { kind: "artworks" };
 
 const PAGE_SIZE = 120;
 
@@ -67,6 +72,13 @@ class GalleryStore {
 
   #unlisten: UnlistenFn | null = null;
 
+  /**
+   * 列表请求的代际。`refreshImages` 每次开跑时 +1，在途响应落地前核对，
+   * 对不上就整体丢弃 —— 快速切换筛选时旧筛选的响应后到，会把新列表连
+   * `total` 一起覆盖掉。`artworks.svelte.ts` 的 `#generation` 是同一道闸。
+   */
+  #generation = 0;
+
   get hasMore(): boolean {
     return this.images.length < this.total;
   }
@@ -88,6 +100,8 @@ class GalleryStore {
         return `画师：${selection.name}`;
       case "pixivTag":
         return `标签：${selection.tag}`;
+      case "artworks":
+        return "作品库";
       default:
         return "全部图片";
     }
@@ -158,28 +172,37 @@ class GalleryStore {
   }
 
   async refreshImages(): Promise<void> {
+    const generation = ++this.#generation;
     this.loading = true;
     this.error = null;
     try {
       const page = await api.listImages(this.#query(0));
+      // 已被更新的请求取代（比如用户又点了一个筛选）：这份响应过期，整体丢弃，
+      // 连 error / loading 都不能碰 —— 那两个标志现在归最新的请求管。
+      if (generation !== this.#generation) return;
       this.images = page.items;
       this.total = page.total;
     } catch (err) {
-      this.error = String(err);
+      if (generation === this.#generation) this.error = String(err);
     } finally {
-      this.loading = false;
+      if (generation === this.#generation) this.loading = false;
     }
   }
 
   async loadMore(): Promise<void> {
     if (this.loading || this.loadingMore || !this.hasMore) return;
+    // 不自增代际：loadMore 是当前这轮列表的延续。但落地前要核对 —— 在途期间
+    // 若来了一轮新的 refreshImages，本页的偏移量已经失效，拼上去会把旧筛选的
+    // 条目混进新列表。
+    const generation = this.#generation;
     this.loadingMore = true;
     try {
       const page = await api.listImages(this.#query(this.images.length));
+      if (generation !== this.#generation) return;
       this.images = [...this.images, ...page.items];
       this.total = page.total;
     } catch (err) {
-      this.error = String(err);
+      if (generation === this.#generation) this.error = String(err);
     } finally {
       this.loadingMore = false;
     }
@@ -202,10 +225,10 @@ class GalleryStore {
     }
   }
 
-  /** 切换筛选维度会自动重新拉取列表。 */
+  /** 切换筛选维度会自动重新拉取列表。作品库不查 `images` 表，是个例外。 */
   select(selection: Selection): void {
     this.selection = selection;
-    void this.refreshImages();
+    if (selection.kind !== "artworks") void this.refreshImages();
   }
 
   async addLibrary(): Promise<void> {
