@@ -61,7 +61,8 @@ npm run check    # svelte-check 类型检查
 │  │     └─ Lightbox.svelte      # 大图查看 + 标签 / 评分编辑
 │  └─ routes/
 │     ├─ +layout.svelte
-│     └─ +page.svelte
+│     ├─ +page.svelte            # 通用图库（网格 / 搜索 / 标签 / 相册）
+│     └─ artworks/+page.svelte   # 作品库（PID 维度，只列路径不加载原图）
 └─ src-tauri/                    # Rust 后端
    ├─ Cargo.toml
    ├─ tauri.conf.json
@@ -71,7 +72,8 @@ npm run check    # svelte-check 类型检查
       ├─ lib.rs                  # 启动流程 + 命令注册
       ├─ state.rs                # AppState 与 spawn_blocking 辅助
       ├─ error.rs                # 统一错误类型（可直接序列化给前端）
-      ├─ scanner.rs              # 目录递归 + 增量索引
+      ├─ scanner.rs              # 目录递归 + 增量索引（通用图库）
+      ├─ artworks.rs             # PID 解析 + 作品维度索引（阶段一）
       ├─ thumbnails.rs           # 缩略图生成与磁盘缓存
       ├─ db/
       │  ├─ mod.rs               # 连接、PRAGMA、时间工具
@@ -82,6 +84,7 @@ npm run check    # svelte-check 类型检查
          ├─ images.rs
          ├─ albums.rs
          ├─ tags.rs
+         ├─ artworks.rs          # 阶段一：作品扫描与分页
          └─ system.rs
 ```
 
@@ -96,7 +99,9 @@ npm run check    # svelte-check 类型检查
 
 ## 数据库设计
 
-迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 v1：
+迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 **v2**：
+
+**通用图库（v1）**
 
 - `libraries` — 用户添加的根目录
 - `images` — 索引到的图片（`path` 唯一，含尺寸、大小、mtime、收藏、评分）
@@ -104,6 +109,14 @@ npm run check    # svelte-check 类型检查
 - `tags` / `image_tags` — 用于交叉筛选的标签
 - `thumbnails` — 缩略图缓存登记表
 - `settings` — 预留的键值设置
+
+**作品维度（v2，阶段一新增）**
+
+- `artworks` — 只收录文件名符合 `{pid}_p{num}` 的图片，一行代表「某作品的某一页」
+
+`artworks` 与 `images` 是**两套并存的索引**：`images` 是通用图库（标签 / 相册 / 缩略图挂在它上面），`artworks` 只做作品维度。两者互不影响，所以作品库的新增不会动到已有图库功能。
+
+> **唯一约束是 `UNIQUE(pid, page)` 而不是 `UNIQUE(pid)`。** 这条不能改：`123456_p0.jpg` 与 `123456_p1.jpg` 的 pid 相同，若只对 pid 加唯一索引，多页作品从第 2 页起会被 `INSERT OR IGNORE` **静默丢弃**且不报错。回归测试见 `db::schema::tests::artworks_dedupes_by_pid_and_page_not_by_pid_alone`。
 
 外键均带 `ON DELETE CASCADE`，连接建立时开启 `foreign_keys`；写库使用 WAL 与 `synchronous=NORMAL`。
 
@@ -120,8 +133,11 @@ npm run check    # svelte-check 类型检查
 | 相册 | `list_albums` `create_album` `rename_album` `delete_album` `add_images_to_album` `remove_images_from_album` `set_album_cover` |
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
+| 作品（阶段一） | `scan_artworks_folder` `list_artworks` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
+
+`scan_artworks_folder(path)` 接收一个文件夹路径，遍历其中的图片、解析 `{pid}_p{num}` 后写入 `artworks` 表，返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0）。`list_artworks(offset, limit)` 分页返回，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。
 
 ## 关键实现说明
 
@@ -147,3 +163,5 @@ npm run check    # svelte-check 类型检查
 - **扫描是单线程的**：`scanner.rs` 顺序遍历。目录很大时可引入 `rayon` 并行读取元数据，注意 SQLite 写入仍需串行。
 - **CSP 当前关闭**：`tauri.conf.json` 中 `security.csp` 为 `null` 以便开发；发布前应配置严格 CSP，并把 `asset:` 加入 `img-src`。
 - **移除图库不会清理缩略图缓存**：缓存可能残留孤儿文件。侧栏底部显示缓存占用，旁边的「清理」按钮调用 `clear_thumbnail_cache` 一次性清空（下次浏览会按需重建）。
+- **作品库不刷新已移动文件的路径**：`scan_artworks_folder` 用 `ON CONFLICT DO NOTHING` 实现去重（这也让 `duplicates` 计数能如实反映去重效果），代价是文件被移动后 `file_path` 仍指向旧位置。若要自动刷新，把冲突分支改成 `DO UPDATE SET file_path = excluded.file_path`，但那样就分不清"新增"和"更新"了。
+- **作品库与通用图库是两套索引**：同一个目录既可以被「添加图库」索引进 `images`，也可以被「作品库扫描」索引进 `artworks`，两边的元数据不共享。若后续要合并成一套，需要决定是否给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
