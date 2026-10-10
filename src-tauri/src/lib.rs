@@ -22,7 +22,6 @@ use crate::state::AppState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         // 剪贴板插件：只用它的 Rust API（`app.clipboard().write_image`），
         // 走的是进程内调用、不经过 IPC，所以不需要在 capabilities 里放行它的命令。

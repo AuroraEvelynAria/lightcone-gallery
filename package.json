@@ -1,6 +1,6 @@
 {
   "name": "lightcone-gallery",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "LightCone Gallery — 基于 Tauri 2 + Svelte 5 的本地图库应用",
   "type": "module",
   "license": "MIT",
@@ -18,8 +18,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-dialog": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-dialog": "^2"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.10",
