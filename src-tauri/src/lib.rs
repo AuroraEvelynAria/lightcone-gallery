@@ -97,6 +97,8 @@ pub fn run() {
             commands::list_artworks,
             // 阶段二：作品缩略图（有损 WebP）+ 前端虚拟滚动
             commands::thumbnail_for_artwork,
+            // 阶段四：把作品移出作品库（不动原图）
+            commands::remove_artworks,
         ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

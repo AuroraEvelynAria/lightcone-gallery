@@ -125,6 +125,20 @@ pub async fn list_artworks(
     .await
 }
 
+/// 把作品移出作品库：删掉数据库记录与对应的缩略图缓存文件。
+///
+/// **绝不碰原图** —— 这是「移出索引」，不是删除文件。原图始终留在用户自己的
+/// 目录里，这也是整个项目的硬约束（应用对图库目录只读不写）。
+///
+/// 缩略图缓存顺手清掉：它是按 `artworks.id` 命名的，行删了以后重扫会拿到新的
+/// 自增 id，旧文件永远不会再被读到，留着就是孤儿。
+///
+/// 返回实际删掉的行数（传进来的 id 可能有一部分已经不存在了）。
+#[tauri::command]
+pub async fn remove_artworks(state: State<'_, AppState>, ids: Vec<i64>) -> AppResult<usize> {
+    let cache_dir = state.thumbnail_dir.clone();
+    with_db(&state, move |conn| artworks::remove(conn, &cache_dir, &ids)).await
+}
 /// 重新生成一张作品的缩略图并把新路径写回数据库，返回该路径。
 ///
 /// 正常路径上前端**不该**调它 —— 列表里已经带着 `thumbnail_path` 了。

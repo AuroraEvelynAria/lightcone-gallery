@@ -113,6 +113,11 @@ export const api = {
    * 缓存被清空 / 文件被删导致 `<img>` 加载失败时调用一次。
    */
   thumbnailForArtwork: (id: number) => invoke<string>("thumbnail_for_artwork", { id }),
+  /**
+   * 把作品移出作品库：删记录与缩略图缓存，**不删除原图**。
+   * 返回实际删掉的行数（传进来的 id 可能有一部分已经不存在）。
+   */
+  removeArtworks: (ids: number[]) => invoke<number>("remove_artworks", { ids }),
 };
 
 export type {

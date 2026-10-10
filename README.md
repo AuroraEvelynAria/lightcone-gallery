@@ -155,11 +155,11 @@ cd src-tauri && cargo test   # 后端测试
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
 | 外观（阶段三） | `set_window_material` `load_settings` `save_settings` |
-| 作品（阶段一 / 二） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` |
+| 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` `remove_artworks` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
 
-`scan_artworks_folder(path)` 接收一个文件夹路径：遍历图片、解析 `{pid}_p{num}` 入库，**再为缺缩略图的作品批量生成 WebP 并把路径写回数据库**。返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0），`thumbnailsGenerated` / `thumbnailsSkipped` / `thumbnailsFailed` 反映本轮缩略图 pass 的产出。`list_artworks(offset, limit)` 分页返回 `pid / original_path / thumbnail_path`，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。`thumbnail_for_artwork(id)` 只是自愈回退，正常路径上前端不会调它。
+`scan_artworks_folder(path)` 接收一个文件夹路径：遍历图片、解析 `{pid}_p{num}` 入库，**再为缺缩略图的作品批量生成 WebP 并把路径写回数据库**。返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0），`thumbnailsGenerated` / `thumbnailsSkipped` / `thumbnailsFailed` 反映本轮缩略图 pass 的产出。`list_artworks(offset, limit)` 分页返回 `pid / original_path / thumbnail_path`，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。`thumbnail_for_artwork(id)` 只是自愈回退，正常路径上前端不会调它。`remove_artworks(ids)` 把作品移出作品库（删记录 + 清缩略图缓存），**不删除原图**。
 
 ## 关键实现说明
 
@@ -220,7 +220,9 @@ cd src-tauri && cargo test   # 后端测试
 - **虚拟滚动是定高网格**：格子尺寸只由「列数 × 容器宽度」推出，所以所有格子必须同宽同高（`object-cover` 裁切）。要做行高不齐的瀑布流得另写组件——那需要逐格测量与位置缓存，本项目的 3D 视差弹窗（阶段四）不依赖它。
 - **扫描会连带生成缩略图，因此首次索引慢**：约 23ms/张（并行后 2000 张约 12s、10000 张约 58s）。这是「扫描时预生成」换来的浏览零等待。若更在意扫描速度，把 `generate_thumbnails` 从 `scan_artworks_folder` 里摘出去、改成按需调用即可，缓存与回退逻辑都不用动。
 - **检视弹窗还不能翻页**：只有单张显示 + Esc / 点空白关闭。RhinE 工业科技风的重构与 3D 视差弹窗是阶段三 / 四的内容。
+- **作品库的移除不是「永久拉黑」**：`remove_artworks` 删的是数据库记录，所以重新扫描同一个目录时它们会**再次入库**（唯一索引不再挡住它们）。要做「移除了就永远不再收录」需要一张忽略表，`scan_folder` 插入前先查它 —— 目前没做。
 - **作品库不刷新已移动文件的路径**：`scan_artworks_folder` 用 `ON CONFLICT DO NOTHING` 实现去重（这也让 `duplicates` 计数能如实反映去重效果），代价是文件被移动后 `original_path` 仍指向旧位置，缩略图会随之变成「源文件缺失」。若要自动刷新，把冲突分支改成 `DO UPDATE SET original_path = excluded.original_path`，但那样就分不清「新增」和「更新」了。
+- **作品库只能扫「目录」，不能复用已登记的图库**：`artworks` 是独立索引，只有通过作品库页面的「选择文件夹并扫描」明确扫过的目录才会进去；侧栏「添加图库」登记的是通用图库（`images` 表）。同一个目录两边都索引会存两份缩略图（320px + 400px）。要合并成一套需要给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
 - **扫描是单线程的**：`scanner.rs`（通用图库）顺序遍历；作品库那边的**缩略图生成**已经并行（见 `ensure_parallel`），但目录遍历本身仍是串行。目录很大时可引入 `rayon` 并行读取元数据，注意 SQLite 写入仍需串行。
 - **CSP 当前关闭**：`tauri.conf.json` 中 `security.csp` 为 `null` 以便开发；发布前应配置严格 CSP，并把 `asset:` 加入 `img-src`。
 - **移除图库不会清理缩略图缓存**：缓存可能残留孤儿文件。侧栏底部显示缓存占用，旁边的「清理」按钮调用 `clear_thumbnail_cache` 一次性清空（作品库下次浏览会按需重建）。

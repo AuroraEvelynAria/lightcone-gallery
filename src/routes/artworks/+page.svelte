@@ -21,6 +21,13 @@
   let thumbProgress = $state<ThumbnailProgress | null>(null);
   let selected = $state<Artwork | null>(null);
 
+  /** 选择模式：卡片上出现勾选框，点卡片是勾选而不是打开弹窗。 */
+  let selecting = $state(false);
+  let picked = $state<Set<number>>(new Set());
+  let removing = $state(false);
+  /** 批量移除的二次确认。 */
+  let confirmingBatch = $state(false);
+
   let progress = $derived(
     artworks.total === 0
       ? "尚未索引任何作品"
@@ -70,6 +77,42 @@
       thumbProgress = null;
     }
   }
+
+  function toggleSelect(artwork: Artwork): void {
+    const next = new Set(picked);
+    if (next.has(artwork.id)) next.delete(artwork.id);
+    else next.add(artwork.id);
+    picked = next;
+  }
+
+  function setSelecting(value: boolean): void {
+    selecting = value;
+    if (!value) {
+      picked = new Set();
+      confirmingBatch = false;
+    }
+  }
+
+  /**
+   * 把作品移出作品库。
+   *
+   * 只删数据库记录与缩略图缓存，**原图不动** —— 这是整个项目的硬约束。
+   * 刷新时保留滚动位置，所以不必重置整个列表。
+   */
+  async function remove(ids: number[]): Promise<void> {
+    if (ids.length === 0 || removing) return;
+    removing = true;
+    try {
+      const removed = await api.removeArtworks(ids);
+      artworks.refreshAfterRemoval(removed);
+      picked = new Set();
+      confirmingBatch = false;
+    } catch (err) {
+      artworks.error = String(err);
+    } finally {
+      removing = false;
+    }
+  }
 </script>
 
 <div class="flex h-screen flex-col bg-surface-950 text-fg">
@@ -102,6 +145,19 @@
     >
       返回图库
     </a>
+
+    {#if artworks.total > 0}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border px-3 py-1.5 text-xs transition {selecting
+          ? 'border-accent-500 bg-accent-500/15 text-accent-400'
+          : 'border-surface-700 text-soft hover:border-surface-600 hover:text-fg'}"
+        aria-pressed={selecting}
+        onclick={() => setSelecting(!selecting)}
+      >
+        {selecting ? "退出选择" : "选择"}
+      </button>
+    {/if}
 
     <button
       type="button"
@@ -177,7 +233,14 @@
         {#snippet children(index)}
           {@const artwork = artworks.at(index)}
           {#if artwork}
-            <ArtworkCard {artwork} onopen={(item) => (selected = item)} />
+            <ArtworkCard
+              {artwork}
+              {selecting}
+              selected={picked.has(artwork.id)}
+              onopen={(item) => (selected = item)}
+              onselecttoggle={toggleSelect}
+              onremove={(item) => void remove([item.id])}
+            />
           {:else}
             <div class="h-full w-full animate-pulse rounded-card bg-surface-850"></div>
           {/if}
@@ -186,6 +249,52 @@
     {/if}
   </main>
 </div>
+
+{#if picked.size > 0}
+  <!-- 批量操作条 -->
+  <div class="pointer-events-none fixed bottom-5 left-1/2 z-40 -translate-x-1/2">
+    <div
+      class="pointer-events-auto flex flex-wrap items-center gap-3 rounded-card border
+             border-surface-700 bg-surface-900/95 px-4 py-2.5 shadow-2xl backdrop-blur"
+    >
+      <span class="text-xs text-soft">
+        已选 <span class="font-mono font-semibold text-accent-400">{picked.size}</span> 项
+      </span>
+
+      <button
+        type="button"
+        class="cursor-pointer rounded-md px-3 py-1.5 text-xs font-medium transition disabled:opacity-60
+               {confirmingBatch ? 'bg-rose-600 text-white hover:bg-rose-500' : 'bg-accent-600 text-on-accent hover:bg-accent-500'}"
+        disabled={removing}
+        onclick={() => {
+          if (confirmingBatch) void remove([...picked]);
+          else confirmingBatch = true;
+        }}
+      >
+        {#if removing}
+          移除中…
+        {:else if confirmingBatch}
+          确认移除 {picked.size} 项？
+        {:else}
+          移除选中
+        {/if}
+      </button>
+
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border border-surface-700 px-3 py-1.5 text-xs text-soft transition hover:border-surface-600 hover:text-fg"
+        onclick={() => {
+          picked = new Set();
+          confirmingBatch = false;
+        }}
+      >
+        取消选择
+      </button>
+
+      <span class="text-[10px] text-mark">只从作品库移除，不删除原图</span>
+    </div>
+  </div>
+{/if}
 
 {#if selected}
   <!-- 按 id 作 key：换一张作品时把「已加载 / 加载失败」的状态一起重置 -->

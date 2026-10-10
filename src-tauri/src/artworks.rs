@@ -131,6 +131,43 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
     })
 }
 
+/// 把作品移出作品库：删掉数据库记录与对应的缩略图缓存文件，返回实际删掉的行数。
+///
+/// **绝不碰原图** —— 这是「移出索引」而不是删除文件，应用对图库目录始终只读。
+/// 这条承诺由 `remove_drops_rows_and_thumbnails_but_never_the_original` 守着。
+///
+/// 缩略图缓存顺手清掉：它按 `artworks.id` 命名，行删了以后重扫会拿到新的自增 id，
+/// 旧文件永远不会再被读到，留着就是孤儿。
+pub fn remove(conn: &mut Connection, cache_dir: &Path, ids: &[i64]) -> AppResult<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction()?;
+    let mut removed = 0usize;
+    {
+        let mut stmt = tx.prepare("DELETE FROM artworks WHERE id = ?1")?;
+        for id in ids {
+            // 传进来的 id 可能有一部分已经不存在了，按实际影响行数计
+            removed += stmt.execute([id])?;
+        }
+    }
+    tx.commit()?;
+
+    for id in ids {
+        let thumb = thumbnails::thumbnail_path(
+            cache_dir,
+            Owner::Artwork,
+            *id,
+            thumbnails::ARTWORK_SIZE,
+        );
+        // 删不掉也无所谓（可能本来就没生成过），不因此让整个操作失败
+        let _ = std::fs::remove_file(thumb);
+    }
+
+    Ok(removed)
+}
+
 /// 为库里缺缩略图（或缓存已过期）的作品生成缩略图，并把路径回填 `thumbnail_path`。
 ///
 /// 这个 pass 是幂等的：缓存仍然新鲜的一律跳过，所以重复扫描同一目录几乎不花时间。
@@ -408,6 +445,54 @@ mod tests {
         let third = generate_thumbnails(&mut conn, &cache, 400, &count).unwrap();
         assert_eq!(third.generated, 1, "缓存文件缺失应被补齐");
         assert_eq!(third.skipped, 2);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// 移除只删记录与缩略图缓存，**绝不能碰原图** —— 这是这个功能的核心承诺。
+    #[test]
+    fn remove_drops_rows_and_thumbnails_but_never_the_original() {
+        let root = make_root("remove");
+        write_image(&root.join("444_p0.jpg"));
+        write_image(&root.join("444_p1.jpg"));
+        write_image(&root.join("555_p0.jpg"));
+
+        let cache = make_root("remove-cache");
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+        generate_thumbnails(&mut conn, &cache, 400, &|_, _| {}).unwrap();
+
+        let rows: Vec<(i64, String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, original_path, thumbnail_path FROM artworks ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(rows.len(), 3);
+        for (_, _, thumb) in &rows {
+            assert!(Path::new(thumb).is_file(), "前置条件：缩略图应已生成 {thumb}");
+        }
+
+        let (target_id, target_original, target_thumb) = rows[0].clone();
+        assert_eq!(remove(&mut conn, &cache, &[target_id]).unwrap(), 1);
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artworks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(left, 2, "记录应被删掉");
+        assert!(!Path::new(&target_thumb).exists(), "缩略图缓存应被清掉");
+        assert!(
+            Path::new(&target_original).is_file(),
+            "移除绝不能删除原图: {target_original}"
+        );
+
+        // 不存在的 id 与空列表都不该报错
+        assert_eq!(remove(&mut conn, &cache, &[999_999]).unwrap(), 0);
+        assert_eq!(remove(&mut conn, &cache, &[]).unwrap(), 0);
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&cache);

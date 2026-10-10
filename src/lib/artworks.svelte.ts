@@ -36,6 +36,8 @@ class ArtworkIndex {
    * `at()` 里读一次 `#revision` 就是在建立这个依赖。
    */
   #revision = $state(0);
+  /** 最近一次 `ensure` 的区间。移除之后按它重新取数，用户的滚动位置才不会跳。 */
+  #range: [number, number] = [0, 0];
 
   /** 读第 index 条；返回 undefined 表示所在块尚未就位，调用方渲染骨架。 */
   at(index: number): Artwork | undefined {
@@ -47,9 +49,30 @@ class ArtworkIndex {
   /** 确保 [start, end) 区间覆盖到的块都在途或已就位。 */
   ensure(start: number, end: number): void {
     if (end <= start) return;
+    this.#range = [start, end];
     const first = Math.floor(Math.max(0, start) / BLOCK_SIZE);
     const last = Math.floor(Math.max(0, end - 1) / BLOCK_SIZE);
     for (let block = first; block <= last; block += 1) void this.#fetch(block);
+  }
+
+  /**
+   * 移除若干条之后刷新。
+   *
+   * 不能简单地 `reset()`：那会把 `total` 归零、虚拟网格整个卸载，用户的滚动
+   * 位置就丢了 —— 在 2000 多条里移除一张，代价不该是「回到顶部」。
+   * 这里只作废块缓存并保留 `total`（后端返回了实际删掉的行数），
+   * 再按上次的可视区间重新取数；期间网格留在原地，只是短暂显示骨架。
+   */
+  refreshAfterRemoval(removed: number): void {
+    this.total = Math.max(0, this.total - removed);
+    this.ready = 0;
+    this.#generation += 1;
+    this.#blocks.clear();
+    this.#inflight.clear();
+    this.#revision += 1;
+    this.error = null;
+
+    if (this.total > 0) this.ensure(this.#range[0], this.#range[1]);
   }
 
   /** 拉第一块，顺带拿到 total。页面挂载时调用一次。 */
