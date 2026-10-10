@@ -81,6 +81,9 @@ export const api = {
   /** 分页读取作品列表：从第 offset 条开始返回 limit 条 */
   listArtworks: (offset = 0, limit = 60) =>
     invoke<ArtworkPage>("list_artworks", { offset, limit }),
+  /** 取作品缩略图（有损 WebP）的绝对路径，配合 convertFileSrc 使用 */
+  thumbnailForArtwork: (id: number, size = 320) =>
+    invoke<string>("thumbnail_for_artwork", { id, size }),
 };
 
 export type {

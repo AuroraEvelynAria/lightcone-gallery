@@ -87,6 +87,8 @@ pub fn run() {
             // 阶段一：作品（Pixiv）维度
             commands::scan_artworks_folder,
             commands::list_artworks,
+            // 阶段二：作品缩略图（有损 WebP）+ 前端虚拟滚动
+            commands::thumbnail_for_artwork,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

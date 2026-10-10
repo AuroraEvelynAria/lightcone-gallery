@@ -1,49 +1,90 @@
 <script lang="ts">
   /**
    * 缩略图：进入视口附近才请求后端生成 / 读取，避免一次性解码上千张图。
+   *
+   * 走 `withThumbnailSlot` 排队，防止滚动时同时抛出一整屏解码任务。
+   * `owner` 决定去 `images` 还是 `artworks` 里找源文件。
    */
   import { convertFileSrc } from "@tauri-apps/api/core";
 
   import { api } from "$lib/api";
+  import { withThumbnailSlot } from "$lib/thumbnailQueue";
 
   let {
-    imageId,
+    owner = "image",
+    id,
     size = 320,
     alt = "",
-  }: { imageId: number; size?: number; alt?: string } = $props();
+  }: { owner?: "image" | "artwork"; id: number; size?: number; alt?: string } = $props();
 
   let element = $state<HTMLElement | null>(null);
   let source = $state<string | null>(null);
   let failed = $state(false);
 
-  // 非响应式标记：观察器只应挂载一次
-  let requested = false;
+  // 非响应式标记：记录当前正在请求 / 已经取到的是哪一条
+  let requestedId: number | null = null;
+
+  /**
+   * 最近的滚动祖先，用作观察器的 root。
+   *
+   * 不能省略 root：默认视口时，滚动容器自身的裁剪会把 rootMargin 完全吃掉，
+   * 于是「提前一屏预取」永远不会发生，快速滚动时满屏骨架。
+   */
+  function scrollContainer(node: HTMLElement): Element | null {
+    let parent = node.parentElement;
+    while (parent) {
+      const { overflowY } = getComputedStyle(parent);
+      if (overflowY === "auto" || overflowY === "scroll") return parent;
+      parent = parent.parentElement;
+    }
+    return null;
+  }
 
   $effect(() => {
     const node = element;
-    if (!node || requested) return;
+    const currentId = id;
+    const currentOwner = owner;
+    const currentSize = size;
+    if (!node) return;
+
+    // 依赖 currentId：虚拟滚动会复用组件实例来渲染不同的条目，
+    // id 一变就得把上一张的状态清干净，否则会显示出错位的缩略图。
+    source = null;
+    failed = false;
+    requestedId = null;
 
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        void load();
+        void load(currentId, currentOwner, currentSize);
       },
       // 提前一屏预取，滚动时不会看到大片占位
-      { rootMargin: "400px" },
+      { root: scrollContainer(node), rootMargin: "400px" },
     );
 
     observer.observe(node);
     return () => observer.disconnect();
   });
 
-  async function load(): Promise<void> {
-    if (requested) return;
-    requested = true;
+  async function load(
+    targetId: number,
+    targetOwner: "image" | "artwork",
+    targetSize: number,
+  ): Promise<void> {
+    if (requestedId === targetId) return;
+    requestedId = targetId;
     try {
-      source = convertFileSrc(await api.thumbnailFor(imageId, size));
+      const path = await withThumbnailSlot(() =>
+        targetOwner === "artwork"
+          ? api.thumbnailForArtwork(targetId, targetSize)
+          : api.thumbnailFor(targetId, targetSize),
+      );
+      // 请求排队期间 id 可能又被换掉（快速滚动），过期的结果直接丢掉
+      if (requestedId !== targetId) return;
+      source = convertFileSrc(path);
     } catch {
-      failed = true;
+      if (requestedId === targetId) failed = true;
     }
   }
 </script>
@@ -54,6 +95,7 @@
       src={source}
       {alt}
       loading="lazy"
+      decoding="async"
       draggable="false"
       class="h-full w-full object-cover"
       onerror={() => (failed = true)}
@@ -65,8 +107,8 @@
           stroke-linecap="round"
           stroke-linejoin="round"
           d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z"
-        />
-      </svg>
+      />
+    </svg>
     </div>
   {:else}
     <div class="h-full w-full animate-pulse bg-surface-850"></div>

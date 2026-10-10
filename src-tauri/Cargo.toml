@@ -37,6 +37,9 @@ image = { version = "0.25", default-features = false, features = [
     "ico",
 ] }
 thiserror = "2"
+# libwebp 绑定。`image` 自带的 WebP 编码器只有 VP8L 无损（见其 lib.rs 的格式表），
+# 无损压照片比 JPEG 还大，缩略图必须走有损通道，所以这里单独引入。
+webp = "0.3"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

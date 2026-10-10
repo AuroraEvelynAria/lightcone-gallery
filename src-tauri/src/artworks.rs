@@ -209,4 +209,57 @@ mod tests {
         let missing = std::env::temp_dir().join("lightcone-no-such-dir-artworks");
         assert!(scan_folder(&mut conn, &missing).is_err());
     }
+
+    /// 扫描器写进库的 `file_path`，缩略图流水线必须能直接吃下去。
+    ///
+    /// 这是两个模块之间唯一的接缝：路径若被写成相对路径、或换了分隔符，
+    /// 各自的单元测试都不会发现，只有把两段接起来才暴露。
+    #[test]
+    fn scanned_file_path_feeds_the_thumbnail_pipeline() {
+        use crate::thumbnails::{self, Owner};
+
+        let root = make_root("pipeline");
+        // 用真实尺寸，确保走的是「解码 -> 缩放 -> 编码」而不是原样拷贝
+        image::RgbImage::new(900, 1200)
+            .save(root.join("654321_p0.jpg"))
+            .unwrap();
+
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+
+        let (id, file_path): (i64, String) = conn
+            .query_row(
+                "SELECT id, file_path FROM artworks WHERE pid = '654321'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            Path::new(&file_path).is_file(),
+            "库里存的路径应指向真实文件: {file_path}"
+        );
+
+        // 缓存目录建在扫描之后，不会反过来影响扫描结果
+        let cache = root.join("cache");
+        let thumb =
+            thumbnails::ensure_thumbnail(&cache, Owner::Artwork, id, Path::new(&file_path), 320)
+                .unwrap();
+
+        let bytes = std::fs::read(&thumb).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP", "作品缩略图必须是 WebP");
+
+        let (width, height) = image::image_dimensions(&thumb).unwrap();
+        assert!(
+            width <= 320 && height <= 320 && height > width,
+            "应等比缩放到 320 以内的竖图，实际 {width}x{height}"
+        );
+        assert!(
+            thumb.to_string_lossy().contains("artworks"),
+            "作品缩略图必须落在 artworks 子目录，否则会和图库的 images 撞车: {}",
+            thumb.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

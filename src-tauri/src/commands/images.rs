@@ -1,6 +1,6 @@
 //! 图片相关命令：分页查询、详情、收藏 / 评分、缩略图。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, params_from_iter};
@@ -172,7 +172,7 @@ pub async fn set_rating(state: State<'_, AppState>, id: i64, rating: i64) -> App
     .await
 }
 
-/// 返回缩略图的绝对路径。前端拿到后用 `convertFileSrc` 转成 asset:// URL。
+/// 返回缩略图的绝对路径（有损 WebP）。前端拿到后用 `convertFileSrc` 转成 asset:// URL。
 #[tauri::command]
 pub async fn thumbnail_for(
     state: State<'_, AppState>,
@@ -189,19 +189,13 @@ pub async fn thumbnail_for(
     })
     .await?;
 
-    let cache_dir = state.thumbnail_dir.clone();
     let size = thumbnails::normalize_size(size.unwrap_or(thumbnails::DEFAULT_SIZE));
-
-    tauri::async_runtime::spawn_blocking(move || {
-        if !source.is_file() {
-            return Err(AppError::NotFound(format!(
-                "源文件已不存在: {}",
-                source.display()
-            )));
-        }
-        let path = thumbnails::ensure_thumbnail(&cache_dir, id, Path::new(&source), size)?;
-        Ok(path.to_string_lossy().into_owned())
-    })
+    thumbnails::ensure_offloaded(
+        state.thumbnail_dir.clone(),
+        thumbnails::Owner::Image,
+        id,
+        source,
+        size,
+    )
     .await
-    .map_err(|err| AppError::Other(format!("缩略图任务执行失败: {err}")))?
 }

@@ -1,5 +1,11 @@
 # LightCone Gallery — 阶段一交接（给 DS V4.1）
 
+> ⚠️ **本文档已过期，不要照着实施。** 阶段一后来走了另一条路：`artworks` 是一张**独立表**
+> （`id / pid / file_path / page / created_at` + `UNIQUE(pid, page)`），而不是本文推荐的
+> `artworks` + `images.artwork_id` 两层模型；阶段二也已经落地（有损 WebP 缩略图 + 虚拟滚动）。
+> 当前实现的权威说明见 `README.md`，实际代码见 `src-tauri/src/artworks.rs` 与 `src/lib/components/VirtualGrid.svelte`。
+> 保留此文件仅作为当时的决策记录。
+
 > 编写时间：2026-10-10
 > 仓库路径：`E:\LightCone Gallery`
 > 配套文档：`HANDOFF.md`（环境、架构、已踩的坑的完整参考）

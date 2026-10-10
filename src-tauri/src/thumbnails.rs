@@ -1,21 +1,45 @@
 //! 缩略图生成与磁盘缓存。
 //!
-//! 缓存布局： `<app_data>/thumbnails/<size>/<image_id>.jpg`
-//! 统一输出 JPEG —— 图库主体是照片，JPEG 在体积和解码速度上最均衡。
-//! 副作用：带透明通道的源图（PNG/ICO）会被压到 RGB，透明区域按源像素值保留。
+//! 缓存布局： `<app_data>/thumbnails/<owner>/<size>/<id>.webp`
+//!
+//! 相比通用图库时期有两处关键变化：
+//!
+//! 1. 统一输出**有损 WebP**。`image` crate 自带的 WebP 编码器只实现了 VP8L 无损，
+//!    无损压照片会比 JPEG 更大，做缩略图没有意义，因此这里改用 `webp`（libwebp 绑定）
+//!    走有损通道。顺带解决了老实现把 PNG / ICO 透明区域压掉的问题。
+//! 2. 缓存目录按归属域 `owner` 分层。`images.id` 与 `artworks.id` 是两张表各自的自增
+//!    主键，共用同一层目录会撞车（`images#1` 与 `artworks#1` 会落到同一个文件上）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use image::codecs::jpeg::JpegEncoder;
-
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 /// 允许请求的缩略图边长白名单，避免任意 size 撑爆缓存目录。
 pub const ALLOWED_SIZES: &[u32] = &[160, 320, 640];
 pub const DEFAULT_SIZE: u32 = 320;
 
-const JPEG_QUALITY: u8 = 82;
+/// 有损 WebP 质量。缩略图尺度上 80 已看不出差别；实测同一张照片，
+/// WebP q80 约为 JPEG q82 的 80% 体积。
+const WEBP_QUALITY: f32 = 80.0;
+
+/// 缩略图的归属域，决定缓存落在哪个子目录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Owner {
+    /// 通用图库的 `images.id`
+    Image,
+    /// Pixiv 作品维度的 `artworks.id`
+    Artwork,
+}
+
+impl Owner {
+    fn dir_name(self) -> &'static str {
+        match self {
+            Owner::Image => "images",
+            Owner::Artwork => "artworks",
+        }
+    }
+}
 
 pub fn normalize_size(size: u32) -> u32 {
     if ALLOWED_SIZES.contains(&size) {
@@ -25,10 +49,11 @@ pub fn normalize_size(size: u32) -> u32 {
     }
 }
 
-pub fn thumbnail_path(cache_dir: &Path, image_id: i64, size: u32) -> PathBuf {
+pub fn thumbnail_path(cache_dir: &Path, owner: Owner, id: i64, size: u32) -> PathBuf {
     cache_dir
+        .join(owner.dir_name())
         .join(size.to_string())
-        .join(format!("{image_id}.jpg"))
+        .join(format!("{id}.webp"))
 }
 
 /// 返回缩略图路径，必要时从原图生成。
@@ -36,30 +61,69 @@ pub fn thumbnail_path(cache_dir: &Path, image_id: i64, size: u32) -> PathBuf {
 /// 缓存命中条件是「缩略图存在且不比原图旧」，因此原图被替换后会自动重算。
 pub fn ensure_thumbnail(
     cache_dir: &Path,
-    image_id: i64,
+    owner: Owner,
+    id: i64,
     source: &Path,
     size: u32,
 ) -> AppResult<PathBuf> {
     let size = normalize_size(size);
-    let dest = thumbnail_path(cache_dir, image_id, size);
+    let dest = thumbnail_path(cache_dir, owner, id, size);
 
     if is_fresh(&dest, source) {
         return Ok(dest);
     }
 
-    let decoded = image::open(source)?;
-    // `thumbnail` 等比缩放到不超出 size×size，且不会放大小图
-    let resized = decoded.thumbnail(size, size).to_rgb8();
-
-    let mut buffer: Vec<u8> = Vec::new();
-    JpegEncoder::new_with_quality(&mut buffer, JPEG_QUALITY).encode_image(&resized)?;
+    let bytes = render(source, size)?;
 
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&dest, &buffer)?;
+    fs::write(&dest, &bytes)?;
 
     Ok(dest)
+}
+
+/// 校验源文件存在并生成 / 复用缓存，全程丢到阻塞线程池。
+///
+/// 命令层的 `thumbnail_for` 与 `thumbnail_for_artwork` 只有「按 id 取源路径」的 SQL
+/// 不同，其余流水线共用这里，省得两边各写一遍 `spawn_blocking` 与存在性检查。
+pub async fn ensure_offloaded(
+    cache_dir: PathBuf,
+    owner: Owner,
+    id: i64,
+    source: PathBuf,
+    size: u32,
+) -> AppResult<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !source.is_file() {
+            return Err(AppError::NotFound(format!(
+                "源文件已不存在: {}",
+                source.display()
+            )));
+        }
+        let path = ensure_thumbnail(&cache_dir, owner, id, &source, size)?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|err| AppError::Other(format!("缩略图任务执行失败: {err}")))?
+}
+
+/// 解码 -> 等比缩放 -> 有损 WebP 编码，返回文件字节。
+fn render(source: &Path, size: u32) -> AppResult<Vec<u8>> {
+    let decoded = image::open(source)?;
+    // `thumbnail` 等比缩放到不超出 size×size，且不会放大小图
+    let resized = decoded.thumbnail(size, size);
+
+    let encoded = if resized.color().has_alpha() {
+        // WebP 支持 alpha，带透明通道的源图（PNG / ICO）不必再压到 RGB
+        let raw = resized.to_rgba8();
+        webp::Encoder::from_rgba(raw.as_raw(), raw.width(), raw.height()).encode(WEBP_QUALITY)
+    } else {
+        let raw = resized.to_rgb8();
+        webp::Encoder::from_rgb(raw.as_raw(), raw.width(), raw.height()).encode(WEBP_QUALITY)
+    };
+
+    Ok(encoded.to_vec())
 }
 
 /// 缩略图存在、且修改时间不早于原图即视为可用。
@@ -106,6 +170,17 @@ pub fn clear_cache(cache_dir: &Path) -> AppResult<()> {
 mod tests {
     use super::*;
 
+    /// 造一个干净的一次性工作目录，测试结束由调用方清理。
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "lightcone-thumb-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     #[test]
     fn unknown_sizes_fall_back_to_default() {
         assert_eq!(normalize_size(160), 160);
@@ -114,24 +189,33 @@ mod tests {
     }
 
     #[test]
-    fn cache_path_is_partitioned_by_size() {
-        let path = thumbnail_path(Path::new("C:/cache"), 42, 320);
-        assert!(path.ends_with("320/42.jpg") || path.ends_with("320\\42.jpg"));
+    fn cache_path_is_partitioned_by_size_and_owner() {
+        let cache = Path::new("C:/cache");
+        let image = thumbnail_path(cache, Owner::Image, 42, 320);
+        let artwork = thumbnail_path(cache, Owner::Artwork, 42, 320);
+
+        assert!(image.ends_with("320/42.webp") || image.ends_with(r"320\42.webp"));
+        assert!(image.to_string_lossy().contains("images"));
+        // 两张表的自增 id 会撞车，必须落在不同目录，否则会互相覆盖缩略图
+        assert_ne!(image, artwork, "不同归属域的同一 id 不能共用缓存文件");
     }
 
     /// 真实解码一张 PNG，覆盖「生成 -> 复用缓存 -> 原图变化后重算」的完整链路。
     #[test]
     fn ensure_thumbnail_generates_reuses_and_invalidates_cache() {
-        let root = std::env::temp_dir().join(format!("lightcone-thumb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = scratch("basic");
         let cache = root.join("cache");
-        std::fs::create_dir_all(&root).unwrap();
 
         let source = root.join("photo.png");
         image::RgbImage::new(1200, 800).save(&source).unwrap();
 
-        let path = ensure_thumbnail(&cache, 7, &source, 320).unwrap();
+        let path = ensure_thumbnail(&cache, Owner::Image, 7, &source, 320).unwrap();
         assert!(path.is_file(), "应生成缩略图文件");
+
+        // 输出必须是 WebP：RIFF....WEBP
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[0..4], b"RIFF", "缩略图应是 RIFF 容器");
+        assert_eq!(&bytes[8..12], b"WEBP", "缩略图应是 WebP 编码");
 
         let (width, height) = image::image_dimensions(&path).unwrap();
         assert!(width <= 320 && height <= 320, "缩略图不得超过请求边长");
@@ -141,7 +225,7 @@ mod tests {
         // 缓存命中：第二次调用不应重写文件
         let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(30));
-        assert_eq!(ensure_thumbnail(&cache, 7, &source, 320).unwrap(), path);
+        assert_eq!(ensure_thumbnail(&cache, Owner::Image, 7, &source, 320).unwrap(), path);
         assert_eq!(
             std::fs::metadata(&path).unwrap().modified().unwrap(),
             mtime_before,
@@ -155,11 +239,53 @@ mod tests {
             .unwrap();
         drop(handle);
 
-        let regenerated = ensure_thumbnail(&cache, 7, &source, 320).unwrap();
+        let regenerated = ensure_thumbnail(&cache, Owner::Image, 7, &source, 320).unwrap();
         assert!(
             std::fs::metadata(&regenerated).unwrap().modified().unwrap() > mtime_before,
             "原图更新后应重新生成缩略图"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 老实现把缩略图压成 JPEG，透明通道会丢；换 WebP 后必须保住。
+    #[test]
+    fn ensure_thumbnail_keeps_alpha_channel() {
+        let root = scratch("alpha");
+        let cache = root.join("cache");
+
+        let source = root.join("sticker.png");
+        let mut rgba = image::RgbaImage::new(64, 64);
+        for (_, _, pixel) in rgba.enumerate_pixels_mut() {
+            *pixel = image::Rgba([10, 200, 90, 128]);
+        }
+        rgba.save(&source).unwrap();
+
+        let path = ensure_thumbnail(&cache, Owner::Image, 1, &source, 320).unwrap();
+        let decoded = image::open(&path).unwrap();
+        assert!(
+            decoded.color().has_alpha(),
+            "WebP 缩略图应保留透明通道，实际为 {:?}",
+            decoded.color()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 同一 id 在两个归属域下互不干扰，这是分目录的核心目的。
+    #[test]
+    fn same_id_in_two_owners_does_not_collide() {
+        let root = scratch("owners");
+        let cache = root.join("cache");
+
+        let source = root.join("photo.png");
+        image::RgbImage::new(400, 400).save(&source).unwrap();
+
+        let as_image = ensure_thumbnail(&cache, Owner::Image, 1, &source, 160).unwrap();
+        let as_artwork = ensure_thumbnail(&cache, Owner::Artwork, 1, &source, 160).unwrap();
+
+        assert_ne!(as_image, as_artwork);
+        assert!(as_image.is_file() && as_artwork.is_file());
 
         let _ = std::fs::remove_dir_all(&root);
     }

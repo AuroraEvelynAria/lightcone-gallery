@@ -13,7 +13,7 @@
 | 语言 | TypeScript（严格模式） | 前端类型与 Rust 模型手工对齐 |
 | 样式 | Tailwind CSS 4 | 走 `@tailwindcss/vite` 插件，无需 `tailwind.config.js` |
 | 数据库 | SQLite + rusqlite | `bundled` 特性内嵌 SQLite 源码，用户机器无需装 sqlite3 |
-| 图像处理 | `image` crate | 只解析文件头读尺寸；缩略图按需生成并缓存 |
+| 图像处理 | `image` + `webp` | `image` 负责解码与缩放，`webp`（libwebp 绑定）负责**有损** WebP 编码 |
 
 ## 环境要求
 
@@ -39,6 +39,8 @@ npm run tauri:build  # 打包安装包 / 可执行文件
 npm run dev      # 仅启动 Vite（浏览器里调 UI，此时无法调用 Tauri 命令）
 npm run build    # 仅构建前端到 build/
 npm run check    # svelte-check 类型检查
+npm test         # 前端自检：虚拟滚动几何（Node 24 原生跑 TS，未引入测试框架）
+cd src-tauri && cargo test   # 后端测试
 ```
 
 ## 目录结构
@@ -50,19 +52,26 @@ npm run check    # svelte-check 类型检查
 │  ├─ lib/
 │  │  ├─ api.ts                  # 所有 invoke 调用的类型化封装
 │  │  ├─ types.ts                # 与 Rust models.rs 对齐的类型定义
-│  │  ├─ gallery.svelte.ts       # 全局状态（Svelte 5 runes）
+│  │  ├─ gallery.svelte.ts       # 通用图库的全局状态（Svelte 5 runes）
+│  │  ├─ artworks.svelte.ts      # 作品列表的分块窗口缓存（按需拉取）
+│  │  ├─ virtualGeometry.ts      # 定高网格的几何推导（纯函数，可脱离浏览器测）
+│  │  ├─ thumbnailQueue.ts       # 缩略图请求的并发闸门
 │  │  ├─ format.ts               # 展示层格式化
 │  │  └─ components/
 │  │     ├─ Sidebar.svelte       # 图库 / 相册 / 标签导航
 │  │     ├─ Toolbar.svelte       # 搜索、排序、扫描
-│  │     ├─ ImageGrid.svelte     # 网格 + 无限滚动
+│  │     ├─ ImageGrid.svelte     # 通用图库网格 + 无限滚动
 │  │     ├─ ImageCard.svelte     # 单张卡片
+│  │     ├─ VirtualGrid.svelte   # 定高网格虚拟滚动（纯 CSS，无滚动库）
+│  │     ├─ ArtworkCard.svelte   # 作品格子（缩略图 + PID 角标）
 │  │     ├─ Thumbnail.svelte     # 懒加载缩略图
 │  │     └─ Lightbox.svelte      # 大图查看 + 标签 / 评分编辑
 │  └─ routes/
 │     ├─ +layout.svelte
 │     ├─ +page.svelte            # 通用图库（网格 / 搜索 / 标签 / 相册）
-│     └─ artworks/+page.svelte   # 作品库（PID 维度，只列路径不加载原图）
+│     └─ artworks/+page.svelte   # 作品库（PID 维度，虚拟滚动缩略图网格）
+├─ tests/
+│  └─ virtual-geometry.test.ts   # 虚拟滚动几何自检（npm test）
 └─ src-tauri/                    # Rust 后端
    ├─ Cargo.toml
    ├─ tauri.conf.json
@@ -74,7 +83,7 @@ npm run check    # svelte-check 类型检查
       ├─ error.rs                # 统一错误类型（可直接序列化给前端）
       ├─ scanner.rs              # 目录递归 + 增量索引（通用图库）
       ├─ artworks.rs             # PID 解析 + 作品维度索引（阶段一）
-      ├─ thumbnails.rs           # 缩略图生成与磁盘缓存
+      ├─ thumbnails.rs           # 缩略图生成与磁盘缓存（有损 WebP）
       ├─ db/
       │  ├─ mod.rs               # 连接、PRAGMA、时间工具
       │  ├─ schema.rs            # 版本化迁移
@@ -84,7 +93,7 @@ npm run check    # svelte-check 类型检查
          ├─ images.rs
          ├─ albums.rs
          ├─ tags.rs
-         ├─ artworks.rs          # 阶段一：作品扫描与分页
+         ├─ artworks.rs          # 阶段一 / 二：作品扫描、分页、缩略图
          └─ system.rs
 ```
 
@@ -93,7 +102,9 @@ npm run check    # svelte-check 类型检查
 | 内容 | 路径 |
 | --- | --- |
 | 数据库 | `<AppData>/com.lightcone.gallery/gallery.db`（Windows：`%APPDATA%\com.lightcone.gallery\`） |
-| 缩略图缓存 | `<AppData>/com.lightcone.gallery/thumbnails/<尺寸>/<图片 id>.jpg` |
+| 缩略图缓存 | `<AppData>/com.lightcone.gallery/thumbnails/<归属域>/<尺寸>/<id>.webp` |
+
+`<归属域>` 取 `images` 或 `artworks`。分目录不是洁癖：`images.id` 与 `artworks.id` 是两张表各自的自增主键，共用一层目录会让 `images#1` 和 `artworks#1` 落到同一个文件上、互相覆盖缩略图。
 
 原图始终留在用户自己的目录里，应用**只读不写**；从图库移除记录不会删除磁盘文件。
 
@@ -116,6 +127,8 @@ npm run check    # svelte-check 类型检查
 
 `artworks` 与 `images` 是**两套并存的索引**：`images` 是通用图库（标签 / 相册 / 缩略图挂在它上面），`artworks` 只做作品维度。两者互不影响，所以作品库的新增不会动到已有图库功能。
 
+阶段二（有损 WebP + 虚拟滚动）**没有动 schema**：换格式只改缓存文件的路径与编码，不新增列，因此 v2 库直接升级，无需迁移分支。
+
 > **唯一约束是 `UNIQUE(pid, page)` 而不是 `UNIQUE(pid)`。** 这条不能改：`123456_p0.jpg` 与 `123456_p1.jpg` 的 pid 相同，若只对 pid 加唯一索引，多页作品从第 2 页起会被 `INSERT OR IGNORE` **静默丢弃**且不报错。回归测试见 `db::schema::tests::artworks_dedupes_by_pid_and_page_not_by_pid_alone`。
 
 外键均带 `ON DELETE CASCADE`，连接建立时开启 `foreign_keys`；写库使用 WAL 与 `synchronous=NORMAL`。
@@ -133,11 +146,11 @@ npm run check    # svelte-check 类型检查
 | 相册 | `list_albums` `create_album` `rename_album` `delete_album` `add_images_to_album` `remove_images_from_album` `set_album_cover` |
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
-| 作品（阶段一） | `scan_artworks_folder` `list_artworks` |
+| 作品（阶段一 / 二） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
 
-`scan_artworks_folder(path)` 接收一个文件夹路径，遍历其中的图片、解析 `{pid}_p{num}` 后写入 `artworks` 表，返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0）。`list_artworks(offset, limit)` 分页返回，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。
+`scan_artworks_folder(path)` 接收一个文件夹路径，遍历其中的图片、解析 `{pid}_p{num}` 后写入 `artworks` 表，返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0）。`list_artworks(offset, limit)` 分页返回，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。`thumbnail_for_artwork(id, size)` 与 `thumbnail_for` 同构，只是源路径取自 `artworks.file_path`。
 
 ## 关键实现说明
 
@@ -149,7 +162,19 @@ npm run check    # svelte-check 类型检查
 
 **增量索引**：扫描时先把该图库的 `path -> (size, mtime)` 读进内存快照，只对新增 / 变化的文件写库，再清理磁盘上已消失的记录。单张图片的尺寸用 `image_dimensions` 读取——只解析文件头，不解码整图。
 
-**缩略图缓存**：`<app data>/thumbnails/<size>/<id>.jpg`，命中条件是「缓存不早于原图」，因此原图被替换后会自动重算。允许的尺寸白名单在 `thumbnails::ALLOWED_SIZES`。
+**缩略图缓存**：`<app data>/thumbnails/<归属域>/<size>/<id>.webp`，命中条件是「缓存不早于原图」，因此原图被替换后会自动重算。允许的尺寸白名单在 `thumbnails::ALLOWED_SIZES`。
+
+**为什么缩略图是有损 WebP**：`image` crate 自带的 WebP 编码器只实现 VP8L 无损（其 `lib.rs` 的格式表里写着 *Only lossless encoding is currently supported*），无损压照片会比 JPEG 更大，做缩略图没有意义。因此编码走 `webp`（libwebp 绑定）的有损通道，质量 80——实测同一张照片约为 JPEG q82 的 80% 体积。附带好处是 WebP 支持 alpha，PNG / ICO 的透明区域不再被压掉。
+
+**虚拟滚动**（阶段二）：`/artworks` 用定高网格虚拟滚动，只把视口内的行渲染成真实 DOM，用一块总高度占位撑住滚动条比例。几何全部落在 `virtualGeometry.ts` 的纯函数里，`npm test` 有 10 个用例覆盖——最容易出错的正是「列数 → 格宽 → 行高 → 可视区间 → 定位偏移」这条链，算错了通常只表现为滚动条轻微抖动或偶尔白屏，靠肉眼很难发现。实测 5000 条数据单屏最多渲染 45 个格子。
+
+**元数据分块 + 像素懒加载**：元数据廉价、像素昂贵。列表按 120 条一块向后端要（`BLOCK_SIZE`），虚拟滚动只请求可视区覆盖到的块；缩略图则是格子进入视口附近才生成。所以滚动开销与列表长度解耦。一次从顶到底的实测：13 次分块请求、399 次缩略图请求（去重后 344 个作品），而不是 5000 次。
+
+**缩略图请求闸门**：虚拟滚动会把整屏格子一次性推进视口，若不限制就会同时抛出上百个「解码整图 → 缩放 → 编码」任务，内存峰值能到 GB 级。`thumbnailQueue.ts` 用固定并发度 4 的先进先出队列压住在途请求（实测并发峰值恰好为 4）。
+
+**观察器的 root 必须指向滚动容器**：`IntersectionObserver` 的 `rootMargin` 只在 root 上生效。把 root 留空（默认视口）时，滚动容器自身的裁剪会把 `rootMargin` 完全吃掉，于是「提前一屏预取」永远不会发生——实测可见缩略图数会从 25 掉到 15。所以 `Thumbnail.svelte` 会向上找到最近的滚动祖先再建观察器。
+
+**虚拟滚动的复用陷阱**：格子按索引作 key，`Thumbnail` 会拿到新 `id` 却沿用旧实例。因此它在 `id` 变化时会清空 `source` / `failed` / `requestedId`，并用「请求期间 id 是否又被换掉」丢弃过期响应。另外 `VirtualGrid` 的格子带 `data-index`——虚拟滚动的 DOM 没有位置语义，这是唯一能把节点和数据下标对上的凭据。
 
 **SQL 注入防护**：筛选条件全部走 `?` 占位符 + `Vec<Value>` 绑定；排序字段通过 `SortBy::column()` 的白名单映射落地，不拼接前端传来的字符串。
 
@@ -159,7 +184,9 @@ npm run check    # svelte-check 类型检查
 
 - **EXIF 尚未解析**：`images.taken_at` 字段已预留但当前为 `NULL`，排序回退到文件修改时间。接入 `kamadak-exif` 后写入该列即可启用「按拍摄时间排序」。
 - **HEIC / RAW 无法索引**：`image` crate 只启用了 jpeg / png / gif / webp / bmp / tiff / ico。扫描时这些文件会计入 `skipped` 而不是被静默丢弃。要支持需更换解码后端（如 `libheif-rs`）。
-- **带透明通道的缩略图**：统一编码为 JPEG，PNG / ICO 的透明区域会丢失。
+- **换成 WebP 后旧缓存会变孤儿**：缓存路径从 `<尺寸>/<id>.jpg` 改成 `<归属域>/<尺寸>/<id>.webp`，旧 JPEG 不会再被读取，但会留在磁盘上。侧栏底部的「清理」按钮可以一次性清掉，下次浏览按需重建。
+- **虚拟滚动是定高网格**：格子尺寸只由「列数 × 容器宽度」推出，所以所有格子必须同宽同高（`object-cover` 裁切）。要做行高不齐的瀑布流得另写组件——那需要逐格测量与位置缓存，本项目的 3D 视差弹窗（阶段四）不依赖它。
+- **作品格暂不可点开**：点击后的检视弹窗按计划是阶段三 / 四的内容，当前只做到「缩略图 + PID」。前端始终只拉缩略图，原图不会出现在列表里。
 - **扫描是单线程的**：`scanner.rs` 顺序遍历。目录很大时可引入 `rayon` 并行读取元数据，注意 SQLite 写入仍需串行。
 - **CSP 当前关闭**：`tauri.conf.json` 中 `security.csp` 为 `null` 以便开发；发布前应配置严格 CSP，并把 `asset:` 加入 `img-src`。
 - **移除图库不会清理缩略图缓存**：缓存可能残留孤儿文件。侧栏底部显示缓存占用，旁边的「清理」按钮调用 `clear_thumbnail_cache` 一次性清空（下次浏览会按需重建）。

@@ -1,14 +1,16 @@
 //! 阶段一：作品（Pixiv）维度的命令。
+//! 阶段二：补上作品缩略图（有损 WebP），供前端虚拟滚动网格取图。
 
 use std::path::PathBuf;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use tauri::State;
 
 use crate::artworks;
 use crate::db::models::{Artwork, ArtworkPage, ArtworkScanSummary};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, with_db};
+use crate::thumbnails;
 
 const DEFAULT_LIMIT: i64 = 60;
 const MAX_LIMIT: i64 = 200;
@@ -60,5 +62,36 @@ pub async fn list_artworks(
             limit,
         })
     })
+    .await
+}
+
+/// 返回作品缩略图的绝对路径（有损 WebP）。
+///
+/// 与 `thumbnail_for` 同构，只是源路径取自 `artworks.file_path`，缓存也落在
+/// `thumbnails/artworks/` 下，不会和通用图库的 `thumbnails/images/` 撞车。
+#[tauri::command]
+pub async fn thumbnail_for_artwork(
+    state: State<'_, AppState>,
+    id: i64,
+    size: Option<u32>,
+) -> AppResult<String> {
+    let source: PathBuf = with_db(&state, move |conn| {
+        conn.query_row("SELECT file_path FROM artworks WHERE id = ?1", [id], |row| {
+            row.get::<_, String>(0)
+        })
+        .optional()?
+        .map(PathBuf::from)
+        .ok_or_else(|| AppError::NotFound(format!("作品 {id} 不存在")))
+    })
+    .await?;
+
+    let size = thumbnails::normalize_size(size.unwrap_or(thumbnails::DEFAULT_SIZE));
+    thumbnails::ensure_offloaded(
+        state.thumbnail_dir.clone(),
+        thumbnails::Owner::Artwork,
+        id,
+        source,
+        size,
+    )
     .await
 }
