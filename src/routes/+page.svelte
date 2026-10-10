@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
+  import ArtworksView from "$lib/components/ArtworksView.svelte";
   import ImageGrid from "$lib/components/ImageGrid.svelte";
   import Lightbox from "$lib/components/Lightbox.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -43,10 +44,16 @@
   <Sidebar />
 
   <div class="flex min-w-0 flex-1 flex-col">
-    <Toolbar />
-    <main class="min-h-0 flex-1 overflow-y-auto">
-      <ImageGrid onopen={(image) => (opened = image)} />
-    </main>
+    <!-- 作品库是侧栏里的一个原地切换视图（与全部图片 / 收藏同一套交互），
+         不再是独立页面 —— 内容区整个交给 ArtworksView，含它自己的工具条 -->
+    {#if gallery.selection.kind === "artworks"}
+      <ArtworksView />
+    {:else}
+      <Toolbar />
+      <main class="min-h-0 flex-1 overflow-y-auto">
+        <ImageGrid onopen={(image) => (opened = image)} />
+      </main>
+    {/if}
   </div>
 </div>
 
