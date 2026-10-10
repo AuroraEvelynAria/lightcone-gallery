@@ -138,8 +138,8 @@ pub fn scan_library(
         let mut upsert = tx.prepare(
             "INSERT INTO images
                  (library_id, path, filename, extension, width, height,
-                  file_size, modified_at, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                  file_size, modified_at, indexed_at, artist_uid, pid)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET
                  library_id  = excluded.library_id,
                  filename    = excluded.filename,
@@ -148,7 +148,9 @@ pub fn scan_library(
                  height      = excluded.height,
                  file_size   = excluded.file_size,
                  modified_at = excluded.modified_at,
-                 indexed_at  = excluded.indexed_at",
+                 indexed_at  = excluded.indexed_at,
+                 artist_uid  = excluded.artist_uid,
+                 pid         = excluded.pid",
         )?;
 
         for item in &discovered {
@@ -161,6 +163,12 @@ pub fn scan_library(
                 None => added += 1,
             }
 
+            // 画师与 pid 都从路径反推，不联网
+            // （见 crate::artists 与 crate::artworks::parse_pid）
+            let artist = crate::artists::parse_artist(&item.path);
+            crate::artists::remember_artist(&tx, &artist, now)?;
+            let pid = crate::artworks::parse_pid(&item.filename).map(|(pid, _)| pid);
+
             upsert.execute(params![
                 library_id,
                 item.path,
@@ -171,6 +179,8 @@ pub fn scan_library(
                 item.file_size,
                 item.modified_at,
                 now,
+                artist.as_ref().map(|(uid, _)| uid.as_str()),
+                pid,
             ])?;
         }
 

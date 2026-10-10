@@ -40,6 +40,8 @@ thiserror = "2"
 # libwebp 绑定。`image` 自带的 WebP 编码器只有 VP8L 无损（见其 lib.rs 的格式表），
 # 无损压照片比 JPEG 还大，缩略图必须走有损通道，所以这里单独引入。
 webp = "0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "default-tls"] }
+tokio = { version = "1.53.2", default-features = false, features = ["time"] }
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

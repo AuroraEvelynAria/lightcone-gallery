@@ -16,7 +16,7 @@ use crate::thumbnails;
 /// 所有查询命令共用的列清单，保证 `Image::from_row` 能按名字取到每一列。
 const IMAGE_COLUMNS: &str = "
     id, library_id, path, filename, extension, width, height,
-    file_size, modified_at, taken_at, is_favorite, rating, indexed_at";
+    file_size, modified_at, taken_at, is_favorite, rating, indexed_at, pid";
 
 /// LIKE 通配符转义，配合 `ESCAPE '\'` 使用，避免用户输入的 % 被当成通配符。
 fn escape_like(term: &str) -> String {
@@ -47,6 +47,40 @@ pub async fn list_images(
         if let Some(tag_id) = query.tag_id {
             filter.push_str(" AND id IN (SELECT image_id FROM image_tags WHERE tag_id = ?)");
             binds.push(Value::Integer(tag_id));
+        }
+        // 画师：一个作品只有一个画师，多个即「任一」（OR）
+        if !query.artist_uids.is_empty() {
+            let marks = std::iter::repeat("?")
+                .take(query.artist_uids.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            filter.push_str(&format!(" AND artist_uid IN ({marks})"));
+            binds.extend(
+                query
+                    .artist_uids
+                    .iter()
+                    .map(|uid| Value::Text(uid.clone())),
+            );
+        }
+        // 标签：多个是「同时包含」（AND），多选标签是为了收窄而不是发散
+        if !query.pixiv_tags.is_empty() {
+            let marks = std::iter::repeat("?")
+                .take(query.pixiv_tags.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            filter.push_str(&format!(
+                " AND pid IN (
+                     SELECT pid FROM illust_tags WHERE tag IN ({marks})
+                     GROUP BY pid HAVING COUNT(DISTINCT tag) = {}
+                 )",
+                query.pixiv_tags.len()
+            ));
+            binds.extend(
+                query
+                    .pixiv_tags
+                    .iter()
+                    .map(|tag| Value::Text(tag.clone())),
+            );
         }
         if query.favorites_only {
             filter.push_str(" AND is_favorite = 1");

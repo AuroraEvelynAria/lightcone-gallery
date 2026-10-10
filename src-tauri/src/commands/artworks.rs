@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::artworks;
 use crate::commands::grant_asset_scope;
-use crate::db::models::{Artwork, ArtworkPage, ArtworkScanSummary};
+use crate::db::models::{ArtistSummary, Artwork, ArtworkPage, ArtworkScanSummary};
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, with_db};
 use crate::thumbnails;
@@ -99,20 +99,67 @@ pub async fn list_artworks(
     state: State<'_, AppState>,
     offset: Option<i64>,
     limit: Option<i64>,
+    artist_uids: Option<Vec<String>>,
+    pixiv_tags: Option<Vec<String>>,
 ) -> AppResult<ArtworkPage> {
     let offset = offset.unwrap_or(0).max(0);
     let limit = limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let artist_uids = clean_filter(artist_uids);
+    let pixiv_tags = clean_filter(pixiv_tags);
 
     with_db(&state, move |conn| {
-        let total: i64 = conn.query_row("SELECT COUNT(*) FROM artworks", [], |row| row.get(0))?;
+        // 筛选条件用占位符拼，值全部走绑定（与 list_images 同一套做法）
+        let mut filter = String::new();
+        let mut binds: Vec<rusqlite::types::Value> = Vec::new();
+
+        // 画师：一个作品只有一个画师，所以多个是「任一」（OR）
+        if !artist_uids.is_empty() {
+            filter.push_str(&format!(
+                " AND artist_uid IN ({})",
+                placeholders(artist_uids.len())
+            ));
+            binds.extend(
+                artist_uids
+                    .iter()
+                    .map(|uid| rusqlite::types::Value::Text(uid.clone())),
+            );
+        }
+
+        // 标签：一个作品有很多标签，所以多个是「**同时包含**」（AND）——
+        // 多选标签的用途是收窄，OR 只会越选越多。
+        // HAVING COUNT(DISTINCT tag) = N 就是「这 N 个标签它都有」。
+        if !pixiv_tags.is_empty() {
+            filter.push_str(&format!(
+                " AND pid IN (
+                     SELECT pid FROM illust_tags WHERE tag IN ({})
+                     GROUP BY pid HAVING COUNT(DISTINCT tag) = {}
+                 )",
+                placeholders(pixiv_tags.len()),
+                pixiv_tags.len()
+            ));
+            binds.extend(
+                pixiv_tags
+                    .iter()
+                    .map(|tag| rusqlite::types::Value::Text(tag.clone())),
+            );
+        }
+
+        let total: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM artworks WHERE 1 = 1{filter}"),
+            rusqlite::params_from_iter(binds.iter()),
+            |row| row.get(0),
+        )?;
 
         // pid 存成 TEXT，排序必须按数值比较，否则 "999" 会排在 "12345" 之后
         let mut stmt = conn.prepare(&format!(
-            "SELECT {ARTWORK_COLUMNS} FROM artworks
+            "SELECT {ARTWORK_COLUMNS} FROM artworks WHERE 1 = 1{filter}
              ORDER BY CAST(pid AS INTEGER) DESC, page ASC, id ASC
-             LIMIT ?1 OFFSET ?2"
+             LIMIT ? OFFSET ?"
         ))?;
-        let rows = stmt.query_map(params![limit, offset], Artwork::from_row)?;
+        let mut all = binds;
+        all.push(rusqlite::types::Value::Integer(limit));
+        all.push(rusqlite::types::Value::Integer(offset));
+        let rows = stmt.query_map(rusqlite::params_from_iter(all.iter()), Artwork::from_row)?;
         let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(ArtworkPage {
@@ -123,6 +170,24 @@ pub async fn list_artworks(
         })
     })
     .await
+}
+
+/// 清掉空白项并去重，避免前端传来 `["", " "]` 这种把 SQL 拼出个空 IN 列表。
+fn clean_filter(values: Option<Vec<String>>) -> Vec<String> {
+    let mut cleaned: Vec<String> = values
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
+}
+
+/// 生成 `?, ?, ?` —— 个数由调用方给，值本身仍然走绑定，不拼进 SQL。
+fn placeholders(count: usize) -> String {
+    std::iter::repeat("?").take(count).collect::<Vec<_>>().join(", ")
 }
 
 /// 把作品移出作品库：删掉数据库记录与对应的缩略图缓存文件。
@@ -153,6 +218,15 @@ pub async fn count_ignored_artworks(state: State<'_, AppState>) -> AppResult<usi
 #[tauri::command]
 pub async fn clear_ignored_artworks(state: State<'_, AppState>) -> AppResult<usize> {
     with_db(&state, |conn| artworks::clear_ignored(conn)).await
+}
+
+/// 列出所有画师及各自的作品数，按总量倒序。
+///
+/// 画师是**从路径反推**的，不联网 —— pixez 这类下载器落盘时就按
+/// `<画师名>_<画师ID>/` 分好了目录。同时统计通用图库与作品库两套索引。
+#[tauri::command]
+pub async fn list_artists(state: State<'_, AppState>) -> AppResult<Vec<ArtistSummary>> {
+    with_db(&state, |conn| crate::artists::list(conn)).await
 }
 
 /// 重新生成一张作品的缩略图并把新路径写回数据库，返回该路径。

@@ -41,6 +41,26 @@ class ArtworkIndex {
   /** 最近一次 `ensure` 的区间。移除之后按它重新取数，用户的滚动位置才不会跳。 */
   #range: [number, number] = [0, 0];
 
+  /**
+   * 当前筛选条件。画师从路径反推、标签来自联网补全的元数据，
+   * 两者都只影响「取哪些块」，不影响块的切分方式。
+   */
+  artistUids = $state<string[]>([]);
+  pixivTags = $state<string[]>([]);
+
+  /**
+   * 换筛选条件：作废所有块并从头拉。
+   *
+   * 与 `refreshAfterRemoval` 不同，这里**必须**重置 `total` —— 筛选后的总数是另一个
+   * 数量级，保留旧值会让虚拟网格按错误的行数铺骨架。
+   */
+  async setFilter(next: { artistUids?: string[]; pixivTags?: string[] }): Promise<void> {
+    this.artistUids = next.artistUids ?? [];
+    this.pixivTags = next.pixivTags ?? [];
+    this.reset();
+    await this.bootstrap();
+  }
+
   /** 读第 index 条；返回 undefined 表示所在块尚未就位，调用方渲染骨架。 */
   at(index: number): Artwork | undefined {
     void this.#revision;
@@ -127,7 +147,10 @@ class ArtworkIndex {
     const generation = this.#generation;
 
     try {
-      const page = await api.listArtworks(block * BLOCK_SIZE, BLOCK_SIZE);
+      const page = await api.listArtworks(block * BLOCK_SIZE, BLOCK_SIZE, {
+        artistUids: this.artistUids,
+        pixivTags: this.pixivTags,
+      });
       // 期间重新扫描过 -> 这一块的偏移量已经没有意义，直接丢弃
       if (generation !== this.#generation) return;
 

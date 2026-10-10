@@ -82,6 +82,10 @@
   const EASE = 0.12;
   /** 收敛阈值，低于它就停掉 rAF。 */
   const SETTLE = 0.02;
+  /** 缩放的插值比例。比倾斜大得多 —— 滚轮要「跟手」，只是逐帧合并后写一次。 */
+  const ZOOM_EASE = 0.4;
+  /** 缩放的收敛阈值，单位是像素，所以要比角度那个小得多。 */
+  const ZOOM_SETTLE = 0.05;
   /** 放大上限。再往上就是马赛克了，没有意义。 */
   const MAX_ZOOM = 8;
   /** 滚轮灵敏度：deltaY 每 1px 乘 exp(0.0015)，一格标准滚轮约 ×1.19。 */
@@ -111,26 +115,36 @@
     return { w: Math.round(natural.w * k), h: Math.round(natural.h * k) };
   });
 
-  // 渲染用值（$state：写进 style 才会触发重绘）
-  let rx = $state(0);
-  let ry = $state(0);
-  let gx = $state(50);
-  let gy = $state(50);
+  /**
+   * 当前渲染值。**刻意不是 `$state`**。
+   *
+   * 视差和缩放都是高频事件驱动的：滚轮一秒能来上百个事件，鼠标移动同理。
+   * 如果每个事件都写 `$state`，Svelte 就会为每个事件重建一次 `style` 属性、
+   * 触发一次样式重算 —— 观感就是「缩放不平滑」。所以这些值只是普通变量，
+   * 由 rAF 统一插值后**直接写进 DOM**，一帧最多写一次。
+   *
+   * 只有下面 `zoomPercent` / `zoomed` 是响应式的，因为它们要驱动界面文案与
+   * 按钮禁用态，而且只在整数百分比变化时才写。
+   */
+  let rx = 0;
+  let ry = 0;
+  let gx = 50;
+  let gy = 50;
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
 
-  let scale = $state(1);
-  let tx = $state(0);
-  let ty = $state(0);
-
-  // 目标值：pointermove 只改这里，由 rAF 统一插值（高频事件里绝不直接写样式）
-  let target = { rx: 0, ry: 0, gx: 50, gy: 50 };
+  // 目标值：事件处理器只改这里，由 rAF 统一插值（高频事件里绝不直接写样式）
+  let target = { rx: 0, ry: 0, gx: 50, gy: 50, scale: 1, tx: 0, ty: 0 };
   let frameId = 0;
+
+  /** 显示用的倍率，只在整数变化时才写，避免每帧重渲染。 */
+  let zoomPercent = $state(100);
+  let zoomed = $state(false);
 
   let dragging = $state(false);
   let dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
   let dragged = 0;
-
-  const zoomed = $derived(scale > 1);
-  const zoomPercent = $derived(Math.round(scale * 100));
 
   /** 系统是否要求减少动效。 */
   const calm = $derived(
@@ -159,17 +173,19 @@
     const px = ((event.clientX - rect.left) / rect.width) * 100;
     const py = ((event.clientY - rect.top) / rect.height) * 100;
     // 鼠标在哪一侧，哪一侧就朝自己翻过来（像用手指按住卡片的那一角）
-    target = {
-      ry: -((px - 50) / 50) * MAX_TILT,
-      rx: ((py - 50) / 50) * MAX_TILT,
-      gx: px,
-      gy: py,
-    };
+    // 只改倾斜那几项，缩放的 target 不动
+    target.ry = -((px - 50) / 50) * MAX_TILT;
+    target.rx = ((py - 50) / 50) * MAX_TILT;
+    target.gx = px;
+    target.gy = py;
     start();
   }
 
   function resetTilt(): void {
-    target = { rx: 0, ry: 0, gx: 50, gy: 50 };
+    target.rx = 0;
+    target.ry = 0;
+    target.gx = 50;
+    target.gy = 50;
     start();
   }
 
@@ -177,17 +193,56 @@
     if (!frameId) frameId = requestAnimationFrame(tick);
   }
 
+  /** 把当前值直接写进 DOM。一帧只调一次，绕开 Svelte 的渲染管线。 */
+  function paint(): void {
+    const stageNode = stage;
+    if (stageNode) {
+      stageNode.style.setProperty("--rx", `${rx}deg`);
+      stageNode.style.setProperty("--ry", `${ry}deg`);
+      stageNode.style.setProperty("--gx", `${gx}%`);
+      stageNode.style.setProperty("--gy", `${gy}%`);
+    }
+    const shotNode = shot;
+    if (shotNode) {
+      shotNode.style.setProperty("--s", String(scale));
+      shotNode.style.setProperty("--tx", `${tx}px`);
+      shotNode.style.setProperty("--ty", `${ty}px`);
+    }
+  }
+
   function tick(): void {
     rx += (target.rx - rx) * EASE;
     ry += (target.ry - ry) * EASE;
     gx += (target.gx - gx) * EASE;
     gy += (target.gy - gy) * EASE;
+    // 缩放比倾斜跟得紧得多 —— 滚轮要「跟手」，但仍然是逐帧合并后写一次
+    scale += (target.scale - scale) * ZOOM_EASE;
+    tx += (target.tx - tx) * ZOOM_EASE;
+    ty += (target.ty - ty) * ZOOM_EASE;
 
     const settled =
       Math.abs(target.rx - rx) < SETTLE &&
       Math.abs(target.ry - ry) < SETTLE &&
       Math.abs(target.gx - gx) < SETTLE &&
-      Math.abs(target.gy - gy) < SETTLE;
+      Math.abs(target.gy - gy) < SETTLE &&
+      Math.abs(target.scale - scale) < ZOOM_SETTLE &&
+      Math.abs(target.tx - tx) < ZOOM_SETTLE &&
+      Math.abs(target.ty - ty) < ZOOM_SETTLE;
+
+    if (settled) {
+      // 收敛时把值钉死在目标上，免得留下 0.001 的偏差
+      scale = target.scale;
+      tx = target.tx;
+      ty = target.ty;
+    }
+
+    paint();
+
+    // 显示状态只在整数百分比 / 是否放大变化时才写，避免每帧重渲染
+    const percent = Math.round(scale * 100);
+    if (percent !== zoomPercent) zoomPercent = percent;
+    const isZoomed = target.scale > 1.001 || scale > 1.001;
+    if (isZoomed !== zoomed) zoomed = isZoomed;
 
     // 收敛后停掉，不空转
     frameId = settled ? 0 : requestAnimationFrame(tick);
@@ -211,9 +266,10 @@
     const next = clamp(nextScale, 1, MAX_ZOOM);
     const maxX = (fit.w * (next - 1)) / 2;
     const maxY = (fit.h * (next - 1)) / 2;
-    scale = next;
-    tx = clamp(nextTx, -maxX, maxX);
-    ty = clamp(nextTy, -maxY, maxY);
+    target.scale = next;
+    target.tx = clamp(nextTx, -maxX, maxX);
+    target.ty = clamp(nextTy, -maxY, maxY);
+    start();
   }
 
   function pan(nextTx: number, nextTy: number): void {
@@ -328,14 +384,19 @@
       loaded = false;
       failed = false;
       natural = { w: 0, h: 0 };
-      scale = 1;
-      tx = 0;
-      ty = 0;
       rx = 0;
       ry = 0;
       gx = 50;
       gy = 50;
-      target = { rx: 0, ry: 0, gx: 50, gy: 50 };
+      scale = 1;
+      tx = 0;
+      ty = 0;
+      target = { rx: 0, ry: 0, gx: 50, gy: 50, scale: 1, tx: 0, ty: 0 };
+      zoomPercent = 100;
+      zoomed = false;
+      if (frameId) cancelAnimationFrame(frameId);
+      frameId = 0;
+      paint();
     });
   });
 
@@ -356,7 +417,11 @@
   $effect(() => {
     void fit.w;
     void fit.h;
-    untrack(() => apply(scale, tx, ty));
+    untrack(() => {
+      apply(target.scale, target.tx, target.ty);
+      // 尺寸变了但倍率没变时 rAF 不会跑，这里补一次绘制
+      if (!frameId) paint();
+    });
   });
 
   $effect(() => {
@@ -427,6 +492,7 @@
 <div
   class="viewer"
   class:is-dragging={dragging}
+  class:is-zoomed={zoomed}
   bind:this={stage}
   role="presentation"
   onpointermove={onpointermove}
@@ -439,7 +505,6 @@
   onwheel={onwheel}
   ondblclick={ondoubleclick}
   onclick={onstageclick}
-  style="--rx: {rx}deg; --ry: {ry}deg; --gx: {gx}%; --gy: {gy}%;"
 >
   <div class="viewer__frame" bind:this={frame}>
     {#if failed}
@@ -464,7 +529,6 @@
               {alt}
               draggable="false"
               class="viewer__img {loaded ? 'is-loaded' : ''}"
-              style="--s: {scale}; --tx: {tx}px; --ty: {ty}px;"
               onload={(event) => {
                 const node = event.currentTarget as HTMLImageElement;
                 natural = { w: node.naturalWidth, h: node.naturalHeight };
@@ -541,7 +605,7 @@
         class="viewer__tool"
         aria-label="放大"
         title="放大 (+)"
-        disabled={scale >= MAX_ZOOM}
+        disabled={zoomPercent >= MAX_ZOOM * 100}
         onclick={() => zoomBy(1.5)}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
@@ -700,6 +764,14 @@
   }
 
   /* ---- 扫光：跟随鼠标的镜面高光（叶子） ------------------------------ */
+  /* 放大后关掉两片 mix-blend-mode 扫光。两个理由：
+     一是 blend mode 要对整块区域重新合成，放大时那是最贵的一笔开销；
+     二是盯着细节看的时候，一层镜面高光本来就碍事。 */
+  .viewer.is-zoomed .viewer__glare,
+  .viewer.is-zoomed .viewer__sheen {
+    display: none;
+  }
+
   .viewer__glare {
     position: absolute;
     inset: 0;

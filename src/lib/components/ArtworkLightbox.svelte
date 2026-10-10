@@ -7,7 +7,8 @@
    */
   import { convertFileSrc } from "@tauri-apps/api/core";
 
-  import type { Artwork } from "$lib/types";
+  import { api } from "$lib/api";
+  import type { Artwork, IllustDetailView } from "$lib/types";
 
   import ImageViewer from "./ImageViewer.svelte";
 
@@ -21,6 +22,31 @@
     /** 上一张 / 下一张。作品库里翻页要等对应数据块到位，所以是异步的 */
     onnavigate?: (delta: number) => void;
   } = $props();
+
+  /** Pixiv 侧的信息（标题 / 画师 / 官方标签）。null 表示还没补全过元数据。 */
+  let illust = $state<IllustDetailView | null>(null);
+  let failed = $state(false);
+
+  $effect(() => {
+    const pid = artwork.pid;
+    let cancelled = false;
+    illust = null;
+    failed = false;
+
+    api
+      .illustDetail(pid)
+      .then((result) => {
+        if (!cancelled) illust = result;
+      })
+      .catch(() => {
+        // 元数据拿不到不该影响看图，静默降级成「还没取过」
+        if (!cancelled) failed = true;
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  });
 </script>
 
 <div
@@ -34,6 +60,14 @@
       {artwork.pid}
     </span>
     <span class="text-xs text-muted">p{artwork.page}</span>
+    {#if illust}
+      <span class="truncate text-sm text-fg" data-selectable>{illust.title}</span>
+      <span class="shrink-0 text-xs text-muted">
+        {illust.artistName}{illust.artistAccount ? ` @${illust.artistAccount}` : ""}
+      </span>
+    {:else if !failed}
+      <span class="text-xs text-mark">读取元数据…</span>
+    {/if}
     <div class="flex-1"></div>
     <button
       type="button"
@@ -44,6 +78,21 @@
       关闭 (Esc)
     </button>
   </header>
+
+  {#if illust && illust.tags.length > 0}
+    <!-- 官方标签：只在取到元数据时出现，不占固定高度 -->
+    <div
+      class="relative z-10 flex flex-wrap items-center gap-1.5 border-b border-surface-800/60 px-5 py-2"
+    >
+      {#each illust.tags as tag (tag)}
+        <span
+          class="rounded-full border border-surface-700 bg-surface-900/60 px-2 py-0.5 text-[11px] text-soft"
+        >
+          {tag}
+        </span>
+      {/each}
+    </div>
+  {/if}
 
   <div class="relative min-h-0 flex-1">
     <ImageViewer

@@ -23,7 +23,9 @@
 - **macOS**：Xcode Command Line Tools
 - **Linux**：`webkit2gtk-4.1`、`libappindicator3`、`librsvg2` 等
 
-首次运行 `npm run tauri:dev` 需要编译约 400 个 crate，耗时较长；之后走增量缓存。
+首次运行 `npm run tauri:dev` 需要编译约 400 个 crate（含 `reqwest` 带来的 TLS 依赖树），耗时较长；之后走增量缓存。
+
+**想用联网补全元数据的话，国内需要能连上 pixiv 的代理**（直连实测是 `HTTP 000`）。在作品库页面的「元数据」一栏填入代理地址（如 `http://127.0.0.1:7897`）并保存即可。不填也不影响其它功能——画师维度完全离线。
 
 ## 快速开始
 
@@ -89,6 +91,8 @@ cd src-tauri && cargo test   # 后端测试
       ├─ error.rs                # 统一错误类型（可直接序列化给前端）
       ├─ scanner.rs              # 目录递归 + 增量索引（通用图库）
       ├─ artworks.rs             # PID 解析 + 作品维度索引（阶段一）
+      ├─ artists.rs              # 画师从路径反推（含「为什么 uid 才是身份」）
+      ├─ pixiv.rs                # 网页接口客户端 + 代理 + 限流分类（不碰 OAuth）
       ├─ thumbnails.rs           # 缩略图生成与磁盘缓存（有损 WebP）
       ├─ db/
       │  ├─ mod.rs               # 连接、PRAGMA、时间工具
@@ -96,6 +100,7 @@ cd src-tauri && cargo test   # 后端测试
       │  └─ models.rs            # 数据模型与查询参数
       └─ commands/               # Tauri 命令，按领域拆分
          ├─ library.rs
+         ├─ pixiv.rs             # 批量补全元数据（限流 / 中止 / 进度事件）
          ├─ images.rs
          ├─ albums.rs
          ├─ tags.rs
@@ -116,7 +121,7 @@ cd src-tauri && cargo test   # 后端测试
 
 ## 数据库设计
 
-迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 **v4**：
+迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 **v7**：
 
 **通用图库（v1）**
 
@@ -132,6 +137,13 @@ cd src-tauri && cargo test   # 后端测试
 - `artworks` — 只收录文件名符合 `{pid}_p{num}` 的图片，一行代表「某作品的某一页」；`original_path` 是原图，`thumbnail_path` 是扫描阶段预生成的缩略图
 - `artwork_roots` — 作品库扫描过的根目录
 - `ignored_artworks` — 被移出过作品库的 `(pid, page)`，扫描时跳过它们
+- `artists` — 画师（`uid` 主键 + 显示名），`artworks` / `images` 各带一列 `artist_uid`
+
+**Pixiv 联网元数据（v6 新增，v7 补 `images.pid`）**
+
+- `illust_meta` — 按 PID 从网页接口取回的标题 / 画师 / 页数 / R-18 等级；**失败的抓取也占一行**（`error` 有值），否则每次都会从头再撞
+- `illust_tags` — 官方标签多对多。标签**只能**从接口来，路径里没有
+- `images.pid` — 从文件名反推的作品号，是通用图库通往 Pixiv 维度的**唯一桥梁**（没有它，弹窗显示不了官方标签、图库页也没法按标签筛选）
 
 `artworks` 与 `images` 是**两套并存的索引**：`images` 是通用图库（标签 / 相册 / 缩略图挂在它上面），`artworks` 只做作品维度。两者互不影响，所以作品库的新增不会动到已有图库功能。
 
@@ -162,6 +174,8 @@ cd src-tauri && cargo test   # 后端测试
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
 | 外观（阶段三） | `set_window_material` `load_settings` `save_settings` |
 | 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` `remove_artworks` `count_ignored_artworks` `clear_ignored_artworks` |
+| 画师 | `list_artists` |
+| Pixiv 元数据 | `illust_detail` `count_missing_meta` `fetch_missing_meta` `list_pixiv_tags` `pixiv_meta_stats` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
 
@@ -220,12 +234,35 @@ cd src-tauri && cargo test   # 后端测试
 
 全屏走 Tauri 的 `setFullscreen`（capabilities 需要 `core:window:allow-set-fullscreen`，`core:default` 只给了查询没给设置），在纯浏览器里回退到 Fullscreen API；全屏时通知外壳收起侧边面板，可用区域变大后显示尺寸重算，图片自动撑满。放大后自动关掉倾斜 —— 鼠标改负责平移，再叠 3D 会晕。
 
+**画师：不用联网，路径里一直有。** pixez 这类下载器落盘时就按 `<画师名>_<画师ID>/<pid>_p<n>.<ext>` 分好了目录，所以画师维度**零网络成本**——实测本地 2653 条作品里 2621 条（98.8%）能从路径解析出来，共 1238 位。解析规则在 `src-tauri/src/artists.rs`，**不能简化成「按第一个下划线切一刀」**：本地数据里画师名含下划线的有 47 个（`Ciza_`、`B_P`）、含数字的有 71 个（`AkiZero1510`、`0032`），所以用「贪婪匹配 + 锚定末尾连续数字」。
+
+> **`uid` 才是身份，名字只是显示标签。** 同一 uid 在本地出现过 12 组不同名字（画师改过名，或下载时把展会后缀写进了目录名），例如 `27848445 -> Coria / Coria@COMIC1☆24 / Coria@コミ1【E31b】`。分组始终按 uid；界面不要假设名字唯一。
+
+**Pixiv 元数据：按 PID 联网取，但不需要 OAuth。** 走公开的网页接口 `GET https://www.pixiv.net/ajax/illust/{pid}?lang=zh`，普通作品连 cookie 都不要。字段形状是在真机上逐个核出来的（见 `src-tauri/src/pixiv.rs` 的模块注释），其中两个最容易写错：**`body.tags` 是对象不是数组**（标签在 `body.tags.tags[].tag`），**作品不存在时 `body` 是空数组而不是对象**（所以必须先判 `error`）。
+
+接口比路径强的地方有两点：**标签只能从这里来**；**画师名是未清洗的** —— 路径里的目录名是 Windows 文件名，`/` 这类字符被删掉了（接口给 `-273℃/望歩`，目录里是 `273℃望歩`），所以补全时用接口的名字**覆盖**路径派生的名字。uid 两边一致（真机比对 10/10）。
+
+**限流是这个功能的核心约束，不是附加项。** 一次批量抓取就是上百个请求打在同一个出口 IP 上。做法：**串行 + 每次间隔 800ms**（抄 Pixiv-Archive 的 `SYNC_DELAY_MS` 默认值）、**非 200 一律不重试**、**连续失败 5 次中止整批**、单次上限 300 条。更要紧的是**把「被限流」和「作品没了」分开**：混为一谈会把限流永久记成「已删除」（污染数据且不再重试），同时不触发中止而继续撞 —— 那才是真会出事的做法。所以 429 / 403 直接判为限流，200 里的报错文案跨语种匹配 `limit` / `rate` / `频繁` / `制限` 等信号，命中就**立刻停**。
+
+> **国内必须走代理。** 实测本机直连 pixiv 是 `HTTP 000`（DNS 被污染成 `face:b00c` 段，直连 IP 也不通）。所以客户端支持显式配置代理，存在 `settings` 表的 `pixiv_proxy` 里，作品库页面上有输入框。
+
+**筛选：两个维度的多选语义不一样。** 画师是**任一**（一个作品只有一个画师），标签是**同时包含**（一个作品有很多标签，多选是为了收窄而不是发散），后者用 `GROUP BY pid HAVING COUNT(DISTINCT tag) = N` 实现。
+
 **SQL 注入防护**：筛选条件全部走 `?` 占位符 + `Vec<Value>` 绑定；排序字段通过 `SortBy::column()` 的白名单映射落地，不拼接前端传来的字符串。
 
 **退出时 checkpoint**：Tauri 的退出路径会直接结束进程、跳过 Rust 析构，`Connection` 不会走 `Drop`，WAL 也就永远合并不回主库（实测退出后主库仍停在 4096 字节、WAL 有 156 KB）。因此 `lib.rs` 用 `app.run(|handle, event| ...)` 捕获 `RunEvent::Exit`，在退出前显式执行 `PRAGMA wal_checkpoint(TRUNCATE)`。这样主库文件始终是自洽的——单独备份 `gallery.db` 不会丢数据。
 
 ## 已知限制与扩展点
 
+- **元数据只补了一部分**：`fetch_missing_meta` 单次上限 300 条、每条间隔 800ms，所以补全整个库要分批点（2653 条约 35 分钟连续请求）。没补过的作品在弹窗里显示「这条还没取过元数据」，而不是「没有标签」——这两件事必须分清。
+- **联网功能的账号风险**：这个接口**不带任何身份**（没有 cookie、没有 token），所以 Pixiv 无法把请求关联到账号，「封号」不是现实的失败模式；现实的是**出口 IP 被限流**，可恢复。但走代理意味着出口 IP 是**共享**的，别人撞脏了会影响主人，反之亦然。**账号风险真正变大的地方在 OAuth 那条路**（每日合集榜单、下载原图都要 refresh_token），那部分没做。
+- **代理是硬前提**：国内直连 pixiv 不通，不填代理时批量抓取会连续失败并中止（界面会提示「检查代理是否开着」）。
+- **`illust_meta` 里失败的记录不会自动重试**：按 `error IS NOT NULL` 挑出来才会重来。目前没有界面入口，要重试得手动触发或清掉那几行。
+- **多选标签的「反悔」是全清**：没有「只去掉一个」之外的批量操作，但每个胶囊点一下就能取消，够用。
+- **画师胶囊只铺前 24 位**：1238 位全铺既慢又没法看，所以搜索框是必需的入口（按名字或 uid 搜）。
+- **标签筛选只在作品库页有效**：v7 之后 `images` 也有 `pid` 了，通用图库的标签筛选在 SQL 层已经就绪（`ImageQuery.pixiv_tags`），但侧栏还没有入口。
+- **两个弹窗的原图加载没有预取**：翻页时要等下一张原图下载完。项目的硬约束是「原图只在弹窗里出现」，预取等于把没在看的原图也拉进内存。
+- **「平滑」没有客观验证**：缩放与视差已改为 rAF 逐帧插值 + 直接写 DOM（绕开 Svelte 渲染管线），放大时也关掉了两片 `mix-blend-mode` 扫光。但帧率没法靠截图测，手感只能人肉判断。
 - **材质是否生效无法检测**：Tauri 的 `apply_effects` 把底层 `window_vibrancy` 的返回值整个丢掉了（见 `tauri/src/vibrancy/windows.rs`），所以不支持的平台上 `set_window_material` 会「成功」但什么也没发生。外观页把平台要求直接标在选项旁，不假装能检测。Mica / Tabbed 需要 Windows 11，Acrylic 需要 Windows 10 v1809+。
 - **「模糊」材质没有实测**：另外四种（纯色 / 云母 / 亚克力 / 标签页）已在真机窗口逐一确认；Blur 是同一个代码路径，但 Windows 11 22621 上拖动窗口会明显卡顿（Tauri 的类型注释里也写了），所以没细看。
 - **语义状态色还没进配色体系**：错误 / 警告用的是 Tailwind 的 `rose` / `amber`，不随配色方案变化。浅色方案下 `bg-rose-950/60` 这种深底会显得突兀，后续应该抽成 `danger` / `warn` 两个令牌。

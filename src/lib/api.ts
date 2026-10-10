@@ -9,19 +9,25 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Album,
   Artwork,
+  ArtistSummary,
   ArtworkPage,
   ArtworkScanSummary,
   CacheUsage,
+  IllustDetailView,
   Image,
   ImageDetail,
   ImageQuery,
   Library,
   PagedImages,
+  MetaBatch,
+  MetaProgress,
+  MetaStats,
   ScanProgress,
   ScanSummary,
   SortBy,
   Stats,
   Tag,
+  TagCount,
   ThumbnailProgress,
 } from "./types";
 
@@ -31,7 +37,10 @@ export const SCAN_PROGRESS_EVENT = "scan://progress";
 /** 作品缩略图生成进度事件的频道名，与 Rust 端 `THUMBNAIL_PROGRESS_EVENT` 保持一致。 */
 export const THUMBNAIL_PROGRESS_EVENT = "artworks://thumbnail-progress";
 
-export type { ScanProgress, ThumbnailProgress };
+/** 元数据抓取进度事件的频道名，与 Rust 端 `META_PROGRESS_EVENT` 保持一致。 */
+export const META_PROGRESS_EVENT = "pixiv://meta-progress";
+
+export type { MetaProgress, ScanProgress, ThumbnailProgress };
 
 export const api = {
   // ---- 图库 ---------------------------------------------------------------
@@ -104,8 +113,17 @@ export const api = {
    *
    * 每条都带着 `originalPath` 与 `thumbnailPath`，卡片直接用后者渲染，无需额外 IPC。
    */
-  listArtworks: (offset = 0, limit = 60) =>
-    invoke<ArtworkPage>("list_artworks", { offset, limit }),
+  listArtworks: (
+    offset = 0,
+    limit = 60,
+    filters?: { artistUids?: string[]; pixivTags?: string[] },
+  ) =>
+    invoke<ArtworkPage>("list_artworks", {
+      offset,
+      limit,
+      artistUids: filters?.artistUids ?? [],
+      pixivTags: filters?.pixivTags ?? [],
+    }),
   /**
    * 重新生成作品缩略图并把新路径写回数据库。
    *
@@ -120,6 +138,33 @@ export const api = {
    * 返回实际删掉的行数（传进来的 id 可能有一部分已经不存在）。
    */
   removeArtworks: (ids: number[]) => invoke<number>("remove_artworks", { ids }),
+  /** 列出所有画师及各自的作品数，按总量倒序。画师从路径反推，不联网。 */
+  listArtists: () => invoke<ArtistSummary[]>("list_artists"),
+  /**
+   * 库里还有多少 PID 没成功取过元数据。
+   * 「成功」认的是 `error IS NULL` —— 抓过但失败的不算。
+   */
+  countMissingMeta: () => invoke<number>("count_missing_meta"),
+  /**
+   * 取一批还没成功抓过的 PID，联网补全元数据（标题 / 画师 / 标签）并落库。
+   *
+   * 后端串行 + 每次间隔 800ms，非 200 不重试，连续失败 5 次中止整批；
+   * `limit` 上限 300。要补全整个库请分批点，不要一次跑几十分钟。
+   * 进度通过 `META_PROGRESS_EVENT` 推送。
+   */
+  fetchMissingMeta: (limit?: number) =>
+    invoke<MetaBatch>("fetch_missing_meta", { limit: limit ?? null }),
+  /** 按标签统计，倒序。标签只能联网取到。 */
+  listPixivTags: (limit?: number) =>
+    invoke<TagCount[]>("list_pixiv_tags", { limit: limit ?? null }),
+  /** 元数据覆盖情况（已补全 / 失败 / 待补全）。 */
+  pixivMetaStats: () => invoke<MetaStats>("pixiv_meta_stats"),
+  /**
+   * 取一条作品的 Pixiv 侧信息（标题 / 画师 / 官方标签），供检视弹窗显示。
+   * 返回 null 表示这条还没补全过元数据 —— 界面要显示「还没取过」而不是「没有标签」。
+   */
+  illustDetail: (pid: string) =>
+    invoke<IllustDetailView | null>("illust_detail", { pid }),
   /** 忽略名单里有多少条（之前被移出过作品库的 `(pid, page)`）。 */
   countIgnoredArtworks: () => invoke<number>("count_ignored_artworks"),
   /** 清空忽略名单，返回清掉的条数。之后重扫目录会把它们再收回来。 */

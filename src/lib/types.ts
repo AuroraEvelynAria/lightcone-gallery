@@ -26,6 +26,11 @@ export interface Image {
   isFavorite: boolean;
   rating: number;
   indexedAt: number;
+  /**
+   * 从文件名反推的 Pixiv 作品号（`{pid}_p{n}`），不符合命名时为 null。
+   * 通用图库靠它去查 `illust_tags` / `illust_meta`。
+   */
+  pid: string | null;
 }
 
 export interface ImageDetail extends Image {
@@ -70,6 +75,10 @@ export interface ImageQuery {
   libraryId?: number | null;
   albumId?: number | null;
   tagId?: number | null;
+  /** 按画师筛选（多选，任一匹配）。画师从路径反推，不需要联网。 */
+  artistUids?: string[] | null;
+  /** 按 Pixiv 官方标签筛选（多选，**同时包含**才算命中）。 */
+  pixivTags?: string[] | null;
   search?: string | null;
   favoritesOnly?: boolean;
   minimumRating?: number | null;
@@ -163,4 +172,80 @@ export interface ArtworkScanSummary {
 export interface ThumbnailProgress {
   processed: number;
   total: number;
+}
+
+// ---------------------------------------------------------------------------
+// 画师与联网元数据
+// ---------------------------------------------------------------------------
+
+/**
+ * 画师及其作品数。
+ *
+ * `name` 只是**显示标签**：同一个 uid 在本地数据里出现过多个历史名字（画师改过名、
+ * 或下载时把展会后缀写进了目录名），后端按先到先得保留最早那个；联网补全元数据后
+ * 会被接口给的**未清洗原名**覆盖（路径里的目录名是 Windows 文件名，`/` 这类字符
+ * 被删掉了）。分组请按 `uid`，不要假设名字唯一。
+ */
+export interface ArtistSummary {
+  uid: string;
+  name: string;
+  /** 通用图库（images）里的张数 */
+  images: number;
+  /** 作品库（artworks）里的条数 */
+  artworks: number;
+}
+
+/** 一个 Pixiv 标签 + 用它标过的作品数。标签只能联网取到，路径里没有。 */
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
+/** 元数据覆盖情况。 */
+export interface MetaStats {
+  /** 成功取到的 PID 数 */
+  done: number;
+  /** 抓过但失败的（含作品已删除） */
+  failed: number;
+  /** 还没抓过的 */
+  pending: number;
+}
+
+/** 一批元数据抓取的结果。 */
+export interface MetaBatch {
+  fetched: number;
+  missing: number;
+  failed: number;
+  /** 连续失败过多而提前中止（通常是代理没开） */
+  aborted: boolean;
+  /** 中止的原因是**被限流**，而不是网络不通。界面上要提示「过一阵再来」。 */
+  rateLimited: boolean;
+}
+
+/** 元数据抓取进度（`pixiv://meta-progress` 事件的负载）。 */
+export interface MetaProgress {
+  processed: number;
+  total: number;
+}
+
+/**
+ * 一条作品的 Pixiv 侧信息。
+ *
+ * 与 `ImageDetail` 分开：那是「主人自己的数据」（自己的标签 / 相册 / 收藏），
+ * 这是「Pixiv 上的数据」（标题 / 画师 / 官方标签），来源与更新时机都不同。
+ */
+export interface IllustDetailView {
+  pid: string;
+  title: string;
+  artistUid: string;
+  /** 接口给的未清洗原名（路径里的目录名会被 Windows 吃掉 `/` 这类字符） */
+  artistName: string;
+  artistAccount: string;
+  pageCount: number;
+  /** 0 全年龄 / 1 R-18 / 2 R-18G */
+  xRestrict: number;
+  /** 0 插画 / 1 漫画 / 2 动图 */
+  illustType: number;
+  createDate: string;
+  tags: string[];
 }

@@ -66,7 +66,7 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
     }
 
     let mut discovered = 0usize;
-    let mut matched: Vec<(String, i64, String)> = Vec::new();
+    let mut matched: Vec<(String, i64, String, Option<(String, String)>)> = Vec::new();
 
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -85,7 +85,10 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
         let Some((pid, page)) = parse_pid(name) else {
             continue;
         };
-        matched.push((pid, page, entry.path().to_string_lossy().into_owned()));
+        let path = entry.path().to_string_lossy().into_owned();
+        // 画师从路径反推，不联网（见 crate::artists）
+        let artist = crate::artists::parse_artist(&path);
+        matched.push((pid, page, path, artist));
     }
 
     let now = now_unix();
@@ -105,17 +108,19 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
     {
         // thumbnail_path 先留空，等 generate_thumbnails 回填
         let mut stmt = tx.prepare(
-            "INSERT INTO artworks (pid, original_path, page, created_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO artworks (pid, original_path, page, created_at, artist_uid)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(pid, page) DO NOTHING",
         )?;
-        for (pid, page, original_path) in &matched {
+        for (pid, page, original_path, artist) in &matched {
             if skipped_pairs.contains(&(pid.clone(), *page)) {
                 ignored += 1;
                 continue;
             }
+            crate::artists::remember_artist(&tx, artist, now)?;
             // changes() 返回 0 即表示这一行被唯一索引挡掉了
-            if stmt.execute(params![pid, original_path, page, now])? > 0 {
+            let artist_uid = artist.as_ref().map(|(uid, _)| uid.as_str());
+            if stmt.execute(params![pid, original_path, page, now, artist_uid])? > 0 {
                 inserted += 1;
             } else {
                 duplicates += 1;
@@ -591,6 +596,47 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// 扫描时就把画师解析好写进行里，不必等回填。
+    #[test]
+    fn scan_records_the_artist_parsed_from_the_directory() {
+        let root = make_root("scan-artist");
+        let artist_dir = root.join("QuAn__6657532");
+        std::fs::create_dir_all(&artist_dir).unwrap();
+        write_image(&artist_dir.join("123456_p0.jpg"));
+        // 直接躺在根目录下的那张解析不出画师
+        write_image(&root.join("654321_p0.jpg"));
+
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+
+        let uid: Option<String> = conn
+            .query_row(
+                "SELECT artist_uid FROM artworks WHERE pid = '123456'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(uid.as_deref(), Some("6657532"));
+
+        let name: String = conn
+            .query_row("SELECT name FROM artists WHERE uid = '6657532'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "QuAn_", "名字要保住末尾那个下划线");
+
+        let orphan: Option<String> = conn
+            .query_row(
+                "SELECT artist_uid FROM artworks WHERE pid = '654321'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(orphan, None);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// 源文件缺失时不能把整个 pass 拖垮，只计入 failed。

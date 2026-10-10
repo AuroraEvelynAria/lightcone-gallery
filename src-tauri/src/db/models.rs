@@ -53,6 +53,9 @@ pub struct Image {
     pub is_favorite: bool,
     pub rating: i64,
     pub indexed_at: i64,
+    /// 从文件名反推的 Pixiv 作品号（`{pid}_p{n}`），不符合命名时为 None。
+    /// 它是通用图库通往 Pixiv 维度（`illust_meta` / `illust_tags`）的唯一桥梁。
+    pub pid: Option<String>,
 }
 
 impl Image {
@@ -71,6 +74,7 @@ impl Image {
             is_favorite: row.get("is_favorite")?,
             rating: row.get("rating")?,
             indexed_at: row.get("indexed_at")?,
+            pid: row.get("pid")?,
         })
     }
 }
@@ -125,6 +129,10 @@ pub struct ImageQuery {
     pub library_id: Option<i64>,
     pub album_id: Option<i64>,
     pub tag_id: Option<i64>,
+    /// 按画师筛选（多选，任一匹配）。画师从路径反推，不需要联网。
+    pub artist_uids: Vec<String>,
+    /// 按 Pixiv 官方标签筛选（多选，**同时包含**才算命中）。
+    pub pixiv_tags: Vec<String>,
     /// 按文件名 / 路径模糊匹配
     pub search: Option<String>,
     pub favorites_only: bool,
@@ -141,6 +149,8 @@ impl Default for ImageQuery {
             library_id: None,
             album_id: None,
             tag_id: None,
+            artist_uids: Vec::new(),
+            pixiv_tags: Vec::new(),
             search: None,
             favorites_only: false,
             minimum_rating: None,
@@ -161,8 +171,22 @@ impl ImageQuery {
             .search
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        self.artist_uids = normalize_list(self.artist_uids);
+        self.pixiv_tags = normalize_list(self.pixiv_tags);
         self
     }
+}
+
+/// 清空空白项并去重，避免前端传来空串把 SQL 拼出个空 IN 列表。
+fn normalize_list(values: Vec<String>) -> Vec<String> {
+    let mut cleaned: Vec<String> = values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+    cleaned
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -341,6 +365,45 @@ pub struct ArtworkScanSummary {
     pub thumbnails_skipped: usize,
     /// 缩略图生成失败的张数（源文件缺失或解码失败）
     pub thumbnails_failed: usize,
+}
+
+/// 一条作品的 Pixiv 侧信息，供两个检视弹窗显示。
+///
+/// 与 `ImageDetail` 分开：那是「主人自己的数据」（标签 / 相册 / 收藏），
+/// 这是「Pixiv 上的数据」（标题 / 画师 / 官方标签），来源与更新时机都不同。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IllustDetailView {
+    pub pid: String,
+    pub title: String,
+    pub artist_uid: String,
+    pub artist_name: String,
+    pub artist_account: String,
+    pub page_count: i64,
+    /// 0 全年龄 / 1 R-18 / 2 R-18G
+    pub x_restrict: i64,
+    /// 0 插画 / 1 漫画 / 2 动图
+    pub illust_type: i64,
+    pub create_date: String,
+    pub tags: Vec<String>,
+}
+
+/// 画师及其作品数。
+///
+/// `name` 只是**显示标签**：同一个 uid 在本地数据里出现过多个历史名字（画师改过名、
+/// 或下载时把展会后缀写进了目录名），`artists` 表按先到先得保留最早那个。
+/// 界面要做分组时请按 `uid` 分组，不要假设名字唯一。见 `crate::artists`。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtistSummary {
+    /// Pixiv 用户 ID，稳定身份
+    pub uid: String,
+    /// 显示用的名字，可能不是最新的那个
+    pub name: String,
+    /// 通用图库（`images`）里的张数
+    pub images: usize,
+    /// 作品库（`artworks`）里的条数
+    pub artworks: usize,
 }
 
 /// 扫描阶段二的缩略图批量生成结果。只用于内部统计，不直接发给前端。

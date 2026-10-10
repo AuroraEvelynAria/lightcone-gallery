@@ -4,6 +4,7 @@ pub mod albums;
 pub mod artworks;
 pub mod images;
 pub mod library;
+pub mod pixiv;
 pub mod system;
 pub mod tags;
 
@@ -11,5 +12,6 @@ pub use albums::*;
 pub use artworks::*;
 pub use images::*;
 pub use library::*;
+pub use pixiv::*;
 pub use system::*;
 pub use tags::*;

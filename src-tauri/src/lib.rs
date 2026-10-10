@@ -2,10 +2,12 @@
 //!
 //! 启动流程：定位 app data 目录 -> 打开并迁移 SQLite -> 恢复 asset:// 目录授权 -> 注册命令。
 
+mod artists;
 mod artworks;
 mod commands;
 mod db;
 mod error;
+mod pixiv;
 mod scanner;
 mod state;
 mod thumbnails;
@@ -101,6 +103,12 @@ pub fn run() {
             commands::remove_artworks,
             commands::count_ignored_artworks,
             commands::clear_ignored_artworks,
+            commands::list_artists,
+            commands::count_missing_meta,
+            commands::fetch_missing_meta,
+            commands::list_pixiv_tags,
+            commands::pixiv_meta_stats,
+            commands::illust_detail,
         ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

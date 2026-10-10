@@ -13,7 +13,7 @@
   import { api } from "$lib/api";
   import { gallery } from "$lib/gallery.svelte";
   import { formatBytes, formatDate, formatDimensions } from "$lib/format";
-  import type { Image, ImageDetail } from "$lib/types";
+  import type { IllustDetailView, Image, ImageDetail } from "$lib/types";
 
   import ImageViewer from "./ImageViewer.svelte";
 
@@ -28,14 +28,18 @@
   } = $props();
 
   let detail = $state<ImageDetail | null>(null);
+  /** Pixiv 侧的信息（标题 / 画师 / 官方标签）。null 表示这条还没补全过元数据。 */
+  let illust = $state<IllustDetailView | null>(null);
   /** 全屏时把面板收起来。由 ImageViewer 通知。 */
   let immersive = $state(false);
 
-  // 切换图片时重新拉取详情（标签 / 相册归属）
+  // 切换图片时重新拉取详情（标签 / 相册归属）与 Pixiv 侧信息
   $effect(() => {
     const id = image.id;
+    const pid = image.pid;
     let cancelled = false;
     detail = null;
+    illust = null;
 
     api
       .getImage(id)
@@ -45,6 +49,18 @@
       .catch((err) => {
         if (!cancelled) gallery.error = String(err);
       });
+
+    // pid 为 null 表示文件名不符合 `{pid}_p{n}`，那就没有 Pixiv 侧可查
+    if (pid) {
+      api
+        .illustDetail(pid)
+        .then((result) => {
+          if (!cancelled) illust = result;
+        })
+        .catch((err) => {
+          if (!cancelled) gallery.error = String(err);
+        });
+    }
 
     return () => {
       cancelled = true;
@@ -179,9 +195,39 @@
           </div>
         </div>
 
-        <!-- 标签 -->
+        <!-- Pixiv 侧信息：标题 / 画师 / 官方标签 -->
+        {#if illust}
+          <section>
+            <h3 class="panel-head">Pixiv</h3>
+            <p class="mb-1 text-sm font-medium text-fg" data-selectable>{illust.title}</p>
+            <p class="mb-2 text-xs text-soft">
+              {illust.artistName}
+              {#if illust.artistAccount}
+                <span class="text-muted">@{illust.artistAccount}</span>
+              {/if}
+              <span class="text-mark">· uid {illust.artistUid}</span>
+            </p>
+            <div class="flex flex-wrap gap-1.5">
+              {#each illust.tags as tag (tag)}
+                <span class="tag-chip">{tag}</span>
+              {/each}
+              {#if illust.tags.length === 0}
+                <span class="text-xs text-muted">这条作品在 Pixiv 上没有标签</span>
+              {/if}
+            </div>
+          </section>
+        {:else if image.pid}
+          <section>
+            <h3 class="panel-head">Pixiv</h3>
+            <p class="text-xs text-muted">
+              这条还没取过元数据（PID {image.pid}）。去作品库页点「补全元数据」。
+            </p>
+          </section>
+        {/if}
+
+        <!-- 标签（主人自己打的） -->
         <section>
-          <h3 class="panel-head">标签</h3>
+          <h3 class="panel-head">我的标签</h3>
           <div class="flex flex-wrap gap-1.5">
             {#each detail?.tags ?? [] as tag (tag.id)}
               <span class="tag-chip">
