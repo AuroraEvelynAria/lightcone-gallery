@@ -1,10 +1,21 @@
 <script lang="ts">
+  /**
+   * 通用图库的检视弹窗：光锥 3D 视差（ImageViewer）+ 右侧信息面板。
+   *
+   * 整个项目的硬约束是「列表只拉缩略图，原图只在弹窗里出现」，所以这里是原图
+   * 唯一会被加载的地方。
+   *
+   * 全屏时收起右侧面板，把整个窗口让给图片 —— 这也是这个弹窗唯一会变的形态，
+   * 所以状态只有 `immersive` 一个布尔值。
+   */
   import { convertFileSrc } from "@tauri-apps/api/core";
 
   import { api } from "$lib/api";
   import { gallery } from "$lib/gallery.svelte";
   import { formatBytes, formatDate, formatDimensions } from "$lib/format";
   import type { Image, ImageDetail } from "$lib/types";
+
+  import ImageViewer from "./ImageViewer.svelte";
 
   let {
     image,
@@ -17,14 +28,14 @@
   } = $props();
 
   let detail = $state<ImageDetail | null>(null);
-  let previewFailed = $state(false);
+  /** 全屏时把面板收起来。由 ImageViewer 通知。 */
+  let immersive = $state(false);
 
   // 切换图片时重新拉取详情（标签 / 相册归属）
   $effect(() => {
     const id = image.id;
     let cancelled = false;
     detail = null;
-    previewFailed = false;
 
     api
       .getImage(id)
@@ -73,64 +84,46 @@
       gallery.error = String(err);
     }
   }
-
-  function onKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") onclose();
-    else if (event.key === "ArrowLeft") onnavigate(-1);
-    else if (event.key === "ArrowRight") onnavigate(1);
-  }
 </script>
 
-<svelte:window onkeydown={onKeydown} />
+<div class="fixed inset-0 z-50 flex bg-black/85 backdrop-blur-sm" role="dialog" aria-modal="true">
+  <div class="relative min-w-0 flex-1">
+    <ImageViewer
+      src={convertFileSrc(image.path)}
+      alt={image.filename}
+      failurePath={image.path}
+      {onclose}
+      {onnavigate}
+      onfullscreen={(value) => (immersive = value)}
+    >
+      {#snippet meta()}
+        <span class="viewer-chip">{image.extension.toUpperCase()}</span>
+        <span class="viewer-caption" data-selectable>{image.filename}</span>
+      {/snippet}
+    </ImageViewer>
 
-<div class="fixed inset-0 z-50 flex bg-black/85 backdrop-blur-sm">
-  <!-- 点击空白处关闭 -->
-  <button type="button" class="absolute inset-0 cursor-default" aria-label="关闭" onclick={onclose}></button>
+    <button
+      type="button"
+      class="absolute top-4 right-4 z-10 cursor-pointer rounded-full bg-black/50 p-2 text-white/80
+             backdrop-blur transition hover:bg-black/70 hover:text-white"
+      aria-label="关闭"
+      title="关闭 (Esc)"
+      onclick={onclose}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    </button>
+  </div>
 
-  <div class="relative z-10 flex min-h-0 flex-1">
-    <!-- 预览区 -->
-    <div class="relative flex min-w-0 flex-1 items-center justify-center p-4">
-      {#if previewFailed}
-        <p class="text-sm text-muted">无法预览该文件（源文件可能已被移动或删除）</p>
-      {:else}
-        <img
-          src={convertFileSrc(image.path)}
-          alt={image.filename}
-          draggable="false"
-          class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
-          onerror={() => (previewFailed = true)}
-        />
-      {/if}
-
-      <button
-        type="button"
-        class="nav-btn left-3"
-        aria-label="上一张"
-        onclick={() => onnavigate(-1)}
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-        </svg>
-      </button>
-      <button type="button" class="nav-btn right-3" aria-label="下一张" onclick={() => onnavigate(1)}>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-        </svg>
-      </button>
-    </div>
-
+  {#if !immersive}
     <!-- 信息面板 -->
     <div class="flex w-80 shrink-0 flex-col border-l border-surface-800 bg-surface-900">
-      <div class="flex items-start justify-between gap-2 border-b border-surface-800 p-4">
-        <div class="min-w-0">
-          <p class="truncate text-sm font-semibold text-fg" data-selectable>{image.filename}</p>
-          <p class="text-[11px] text-muted">{image.extension.toUpperCase()}</p>
-        </div>
-        <button type="button" class="icon-btn" aria-label="关闭" onclick={onclose}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+      <div class="border-b border-surface-800 p-4">
+        <p class="truncate text-sm font-semibold text-fg" data-selectable>{image.filename}</p>
+        <p class="text-[11px] text-muted">
+          {image.extension.toUpperCase()} · {formatDimensions(image.width, image.height)}
+        </p>
       </div>
 
       <div class="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
@@ -193,7 +186,11 @@
             {#each detail?.tags ?? [] as tag (tag.id)}
               <span class="tag-chip">
                 {tag.name}
-                <button type="button" class="cursor-pointer opacity-60 hover:opacity-100" onclick={() => detachTag(tag.id)}>×</button>
+                <button
+                  type="button"
+                  class="cursor-pointer opacity-60 hover:opacity-100"
+                  onclick={() => detachTag(tag.id)}>×</button
+                >
               </span>
             {:else}
               <span class="text-xs text-muted">未添加标签</span>
@@ -268,26 +265,23 @@
             {image.path}
           </p>
         </section>
+
+        <p class="border-t border-surface-800 pt-3 text-[11px] leading-relaxed text-mark">
+          滚轮缩放 · 双击放大 / 还原 · 放大后拖动平移 · ← → 翻页 · F 全屏 · Esc 退出
+        </p>
       </div>
     </div>
-  </div>
+  {/if}
 </div>
 
 <style lang="postcss">
   @reference "../../app.css";
 
-  .nav-btn {
-    @apply absolute cursor-pointer rounded-full bg-black/50 p-2 text-white/80 backdrop-blur
-           transition hover:bg-black/70 hover:text-white;
-  }
   .panel-head {
     @apply mb-2 text-[11px] font-semibold tracking-wide text-muted uppercase;
   }
   .tag-chip {
     @apply inline-flex items-center gap-1 rounded-full border border-surface-700 px-2 py-0.5
            text-xs text-soft;
-  }
-  .icon-btn {
-    @apply shrink-0 cursor-pointer rounded p-1 text-muted transition hover:bg-surface-800 hover:text-fg;
   }
 </style>

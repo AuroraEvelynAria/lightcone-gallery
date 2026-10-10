@@ -24,12 +24,18 @@
     return () => clearTimeout(noticeTimer);
   });
 
-  function navigate(delta: number): void {
+  async function navigate(delta: number): Promise<void> {
     const current = opened;
     if (!current) return;
     const index = gallery.images.findIndex((item) => item.id === current.id);
-    const next = index >= 0 ? gallery.images[index + delta] : undefined;
-    if (next) opened = next;
+    if (index < 0) return;
+
+    const next = index + delta;
+    // 撞到已加载的边界就再要一页，否则一直按 → 会停在第一批 120 张上
+    if (next >= gallery.images.length && gallery.hasMore) await gallery.loadMore();
+
+    const target = gallery.images[next];
+    if (target) opened = target;
   }
 </script>
 

@@ -82,6 +82,28 @@ class ArtworkIndex {
     this.booted = true;
   }
 
+  /**
+   * 取第 index 条，所在块还没到位就等它到。弹窗翻页用。
+   *
+   * 虚拟滚动是「滚到哪取哪」，翻页会跳到当前窗口之外，所以这里必须能等。
+   * 超时返回 undefined，让调用方保持原样 —— 宁可不动，也不要卡在空白弹窗上。
+   */
+  async fetchAt(index: number): Promise<Artwork | undefined> {
+    if (index < 0 || index >= this.total) return undefined;
+
+    const existing = this.at(index);
+    if (existing) return existing;
+
+    this.ensure(index, index + 1);
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const item = this.at(index);
+      if (item) return item;
+    }
+    return undefined;
+  }
+
   /** 重新扫描后清空重来 —— 库里的行变了，旧块全部作废。 */
   reset(): void {
     this.#generation += 1;

@@ -20,6 +20,8 @@
   let summary = $state<ArtworkScanSummary | null>(null);
   let thumbProgress = $state<ThumbnailProgress | null>(null);
   let selected = $state<Artwork | null>(null);
+  /** 弹窗当前这张在库里的序号，翻页要用。 */
+  let selectedIndex = $state<number | null>(null);
 
   /** 选择模式：卡片上出现勾选框，点卡片是勾选而不是打开弹窗。 */
   let selecting = $state(false);
@@ -83,6 +85,21 @@
     if (next.has(artwork.id)) next.delete(artwork.id);
     else next.add(artwork.id);
     picked = next;
+  }
+
+  /**
+   * 弹窗里翻页。
+   *
+   * 目标可能落在还没取过的数据块上（虚拟滚动只保证可视窗口内的块），
+   * 所以交给 `fetchAt` 去等 —— 等不到就原地不动，不切到空白。
+   */
+  async function navigate(delta: number): Promise<void> {
+    const index = selectedIndex;
+    if (index === null) return;
+    const next = await artworks.fetchAt(index + delta);
+    if (!next) return;
+    selectedIndex = index + delta;
+    selected = next;
   }
 
   function setSelecting(value: boolean): void {
@@ -237,7 +254,10 @@
               {artwork}
               {selecting}
               selected={picked.has(artwork.id)}
-              onopen={(item) => (selected = item)}
+              onopen={(item) => {
+                selected = item;
+                selectedIndex = index;
+              }}
               onselecttoggle={toggleSelect}
               onremove={(item) => void remove([item.id])}
             />
@@ -297,8 +317,12 @@
 {/if}
 
 {#if selected}
-  <!-- 按 id 作 key：换一张作品时把「已加载 / 加载失败」的状态一起重置 -->
-  {#key selected.id}
-    <ArtworkLightbox artwork={selected} onclose={() => (selected = null)} />
-  {/key}
+  <ArtworkLightbox
+    artwork={selected}
+    onclose={() => {
+      selected = null;
+      selectedIndex = null;
+    }}
+    onnavigate={(delta) => void navigate(delta)}
+  />
 {/if}
