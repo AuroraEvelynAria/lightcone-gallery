@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params_from_iter};
 use tauri::State;
 
 use crate::db::models::{
-    AlbumBrief, Image, ImageDetail, ImageQuery, PagedImages, Tag,
+    AlbumBrief, Image, ImageDetail, ImageQuery, Orientation, PagedImages, Tag,
 };
 use crate::error::{AppError, AppResult};
 use crate::state::{AppState, with_db};
@@ -81,6 +81,14 @@ pub async fn list_images(
                     .iter()
                     .map(|tag| Value::Text(tag.clone())),
             );
+        }
+        // 画幅：宽高在扫描时就存下来了，直接比列即可
+        if let Some(orientation) = query.orientation {
+            filter.push_str(match orientation {
+                Orientation::Landscape => " AND width > height",
+                Orientation::Portrait => " AND width < height",
+                Orientation::Square => " AND width = height",
+            });
         }
         if query.favorites_only {
             filter.push_str(" AND is_favorite = 1");

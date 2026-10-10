@@ -21,10 +21,16 @@
     image,
     onclose,
     onnavigate,
+    onfilterartist,
+    onfiltertag,
   }: {
     image: Image;
     onclose: () => void;
     onnavigate: (delta: number) => void;
+    /** 点画师名：只看这位画师的作品 */
+    onfilterartist?: (uid: string, name: string) => void;
+    /** 点官方标签：只看带这个标签的作品 */
+    onfiltertag?: (tag: string) => void;
   } = $props();
 
   let detail = $state<ImageDetail | null>(null);
@@ -102,19 +108,43 @@
   }
 </script>
 
-<div class="fixed inset-0 z-50 flex bg-black/85 backdrop-blur-sm" role="dialog" aria-modal="true">
+<div class="viewer-shell fixed inset-0 z-50 flex backdrop-blur-sm" role="dialog" aria-modal="true">
   <div class="relative min-w-0 flex-1">
     <ImageViewer
       src={convertFileSrc(image.path)}
       alt={image.filename}
       failurePath={image.path}
+      copyPath={image.path}
       {onclose}
       {onnavigate}
       onfullscreen={(value) => (immersive = value)}
     >
+      <!--
+        照片下面展示的是**这幅画在 Pixiv 上的信息**，不是本地文件名 ——
+        文件名（`148607673_p0.png`）对「这是谁的画、画的是什么」毫无帮助。
+        画师名做成按钮，点一下就只看这位画师的作品。
+      -->
       {#snippet meta()}
-        <span class="viewer-chip">{image.extension.toUpperCase()}</span>
-        <span class="viewer-caption" data-selectable>{image.filename}</span>
+        {#if illust}
+          <!-- 收成局部常量：`illust` 是 $state，闭包里读不到外层的收窄 -->
+          {@const info = illust}
+          <span class="viewer-caption" data-selectable>{info.title}</span>
+          <button
+            type="button"
+            class="viewer-artist"
+            title="只看 {info.artistName} 的作品"
+            onclick={() => onfilterartist?.(info.artistUid, info.artistName)}
+          >
+            {info.artistName}
+          </button>
+          {#if info.artistAccount}
+            <span class="viewer-caption">@{info.artistAccount}</span>
+          {/if}
+        {:else if image.pid}
+          <span class="viewer-caption">还没取过元数据（PID {image.pid}）</span>
+        {:else}
+          <span class="viewer-caption">文件名不符合 {'{pid}_p{n}'} 规范，没有 Pixiv 信息</span>
+        {/if}
       {/snippet}
     </ImageViewer>
 
@@ -209,7 +239,14 @@
             </p>
             <div class="flex flex-wrap gap-1.5">
               {#each illust.tags as tag (tag)}
-                <span class="tag-chip">{tag}</span>
+                <button
+                  type="button"
+                  class="tag-chip cursor-pointer transition hover:border-accent-500 hover:text-accent-400"
+                  title="只看带「{tag}」的作品"
+                  onclick={() => onfiltertag?.(tag)}
+                >
+                  {tag}
+                </button>
               {/each}
               {#if illust.tags.length === 0}
                 <span class="text-xs text-muted">这条作品在 Pixiv 上没有标签</span>
@@ -322,6 +359,11 @@
 
 <style lang="postcss">
   @reference "../../app.css";
+
+  /* 背幕跟着主题走 —— 理由见 ArtworkLightbox 里的同名样式 */
+  .viewer-shell {
+    background: color-mix(in oklab, var(--tone-bg) 88%, transparent);
+  }
 
   .panel-head {
     @apply mb-2 text-[11px] font-semibold tracking-wide text-muted uppercase;

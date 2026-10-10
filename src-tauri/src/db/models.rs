@@ -133,6 +133,8 @@ pub struct ImageQuery {
     pub artist_uids: Vec<String>,
     /// 按 Pixiv 官方标签筛选（多选，**同时包含**才算命中）。
     pub pixiv_tags: Vec<String>,
+    /// 按画幅筛选：`landscape` / `portrait` / `square`。
+    pub orientation: Option<Orientation>,
     /// 按文件名 / 路径模糊匹配
     pub search: Option<String>,
     pub favorites_only: bool,
@@ -151,6 +153,7 @@ impl Default for ImageQuery {
             tag_id: None,
             artist_uids: Vec::new(),
             pixiv_tags: Vec::new(),
+            orientation: None,
             search: None,
             favorites_only: false,
             minimum_rating: None,
@@ -175,6 +178,21 @@ impl ImageQuery {
         self.pixiv_tags = normalize_list(self.pixiv_tags);
         self
     }
+}
+
+/// 画幅。宽高在扫描阶段就读过文件头存下来了，所以这个筛选零成本。
+///
+/// 用 `Option<Orientation>` 而不是字符串：前端传错值时反序列化直接失败，
+/// 而不是悄悄拼出一个永远匹配不到任何行的 SQL。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Orientation {
+    /// 宽 > 高
+    Landscape,
+    /// 宽 < 高
+    Portrait,
+    /// 宽 = 高
+    Square,
 }
 
 /// 清空空白项并去重，避免前端传来空串把 SQL 拼出个空 IN 列表。

@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本，与下面最后一个迁移分支保持一致。
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 9;
 
 /// v1：图库、图片、相册、标签、缩略图缓存与键值设置。
 const MIGRATION_V1: &str = r#"
@@ -226,6 +226,39 @@ ALTER TABLE images ADD COLUMN pid TEXT;
 CREATE INDEX IF NOT EXISTS idx_images_pid ON images(pid);
 "#;
 
+/// 8. `illust_meta` 补一列 `missing`，把「作品在 Pixiv 上没了」标成终态。
+///
+/// 之前 `Missing` 和可重试的失败共用 `error` 列，导致批量抓取的挑选条件
+/// （「没有 `error IS NULL` 的行」）会**每次都把已删除的作品重新挑出来**：
+/// 既对着永远不会回来的作品反复发请求，又让「待补全」永远归不了零。
+///
+/// 分成两态：
+/// - `missing = 1` —— Pixiv 明确返回 404，作品被删 / 转私密 / 下架。终态，不重试。
+/// - `error IS NOT NULL AND missing = 0` —— 网络、超时、限流。可重试。
+///
+/// 留 `reset_missing_meta` 这个出口：转私密的作品以后可能放回来，
+/// 「终态」不该是单向门。
+const MIGRATION_V8: &str = r#"
+ALTER TABLE illust_meta ADD COLUMN missing INTEGER NOT NULL DEFAULT 0;
+
+-- 全新库走到这里时一并把订正做掉；已经跑过 v8 的库由 v9 补上（见 MIGRATION_V9）。
+UPDATE illust_meta SET missing = 1 WHERE error = '作品不存在或已删除';
+
+CREATE INDEX IF NOT EXISTS idx_illust_meta_missing ON illust_meta(missing);
+"#;
+
+/// 9. 数据订正：把 v8 之前写下的「已删除」记录补上 `missing = 1`。
+///
+/// **为什么不合并进 v8**：v8 的开发过程中被 `tauri dev` 自动重启跑过一次，
+/// 那条记录已经落盘；之后再往 v8 里加语句也不会重跑 —— 迁移一旦应用就不再回头。
+/// 这正是「新增变更要追加新分支、不要改历史分支」这条规矩的现实版本。
+///
+/// 判据是文案而不是「所有 error 非空」：v8 之前的 `mark_missing` 是当时唯一会写
+/// 这行的路径，文案固定。可重试的网络失败文案各不相同，不能一并标成终态。
+const MIGRATION_V9: &str = r#"
+UPDATE illust_meta SET missing = 1 WHERE error = '作品不存在或已删除';
+"#;
+
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -250,8 +283,14 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
     if version < 7 {
         apply(conn, 7, MIGRATION_V7)?;
     }
+    if version < 8 {
+        apply(conn, 8, MIGRATION_V8)?;
+    }
+    if version < 9 {
+        apply(conn, 9, MIGRATION_V9)?;
+    }
 
-    // 后续迁移在此追加： if version < 8 { apply(conn, 8, MIGRATION_V8)?; }
+    // 后续迁移在此追加： if version < 10 { apply(conn, 10, MIGRATION_V10)?; }
 
     // v3 之前入库的作品行从没登记过扫描根目录。这里反推补一次，同时覆盖两条路径：
     // 「从老库升级上来」以及「库已经停在 v3、但 v3 迁移早于这段逻辑上线」。

@@ -2,6 +2,13 @@
   import { gallery } from "$lib/gallery.svelte";
   import type { SortBy } from "$lib/types";
 
+  /** 画幅选项。标签只用一个字，塞在工具条里不占地。 */
+  const ORIENTATIONS = [
+    { value: "landscape", label: "横", title: "只看横屏（宽 > 高）" },
+    { value: "portrait", label: "竖", title: "只看竖屏（宽 < 高）" },
+    { value: "square", label: "方", title: "只看方形（宽 = 高）" },
+  ] as const;
+
   const SORT_OPTIONS: { value: SortBy; label: string }[] = [
     { value: "modifiedAt", label: "修改时间" },
     { value: "indexedAt", label: "加入时间" },
@@ -77,6 +84,32 @@
     <option value={4}>≥ 4 星</option>
     <option value={5}>5 星</option>
   </select>
+
+  <!--
+    画幅筛选。做成三个小按钮而不是下拉：选项只有三种，平铺出来一眼就能选，
+    不必先展开再选（原生下拉在自动化里也驱动不了）。
+    都不选 = 不限，再点一次选中的那个就取消。
+  -->
+  <div class="flex items-center gap-0.5 rounded-md border border-surface-700 bg-surface-850 p-0.5">
+    {#each ORIENTATIONS as option (option.value)}
+      <button
+        type="button"
+        class="cursor-pointer rounded px-2 py-1 text-xs transition {gallery.orientation ===
+        option.value
+          ? 'bg-accent-500/20 text-accent-400'
+          : 'text-soft hover:text-fg'}"
+        aria-pressed={gallery.orientation === option.value}
+        title={option.title}
+        onclick={() => {
+          gallery.orientation =
+            gallery.orientation === option.value ? null : option.value;
+          void gallery.refreshImages();
+        }}
+      >
+        {option.label}
+      </button>
+    {/each}
+  </div>
 
   <select
     class="cursor-pointer rounded-md border border-surface-700 bg-surface-850 px-2 py-1.5 text-sm text-soft outline-none focus:border-accent-500"

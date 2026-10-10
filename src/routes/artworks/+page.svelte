@@ -84,6 +84,27 @@
   let proxy = $state("");
   let proxySaved = $state(false);
 
+  // ---- 自动补全 ----------------------------------------------------------
+  let autoRunning = $state(false);
+  /** 本轮的起点，用来按实测速率估剩余时间。 */
+  let autoStartedAt = 0;
+  /** 整轮进度。事件里的 overallDone 是「本批开始前」的数字，要加上本批已处理。 */
+  let overall = $state({ done: 0, total: 0 });
+
+  /**
+   * 预计剩余时间。
+   *
+   * 用**实测速率**而不是写死「1 秒一条」：被限流、代理变慢、或者冷却期间，
+   * 写死的估计会一直骗人。速率不准时宁可不显示（返回 null）。
+   */
+  let eta = $derived.by(() => {
+    if (!autoRunning || overall.done === 0 || !autoStartedAt) return null;
+    const elapsed = (Date.now() - autoStartedAt) / 1000;
+    const rate = overall.done / elapsed;
+    if (rate <= 0) return null;
+    return Math.round(Math.max(0, overall.total - overall.done) / rate);
+  });
+
   /** 选择模式：卡片上出现勾选框，点卡片是勾选而不是打开弹窗。 */
   let selecting = $state(false);
   let picked = $state<Set<number>>(new Set());
@@ -106,6 +127,12 @@
     let metaDisposed = false;
     void listen<MetaProgress>(META_PROGRESS_EVENT, (event) => {
       metaProgress = event.payload;
+      if (event.payload.overallTotal > 0) {
+        overall = {
+          done: event.payload.overallDone + event.payload.processed,
+          total: event.payload.overallTotal,
+        };
+      }
     }).then((stop) => {
       if (metaDisposed) stop();
       else metaUnlisten = stop;
@@ -202,6 +229,57 @@
     } finally {
       metaBusy = false;
       metaProgress = null;
+    }
+  }
+
+  /**
+   * 一键补完剩下的全部。
+   *
+   * 后端是「一批接一批」跑的，限流参数和手动点完全一样（800ms 间隔、非 200 不重试、
+   * 撞限流立刻停），只是多了每 200 条歇 30 秒的停顿，所以不会比手动点更激进。
+   */
+  async function startAuto(): Promise<void> {
+    if (autoRunning) return;
+    autoRunning = true;
+    autoStartedAt = Date.now();
+    overall = { done: 0, total: 0 };
+    lastBatch = null;
+    try {
+      lastBatch = await api.fetchAllMeta();
+      await refreshTaxonomy();
+    } catch (err) {
+      artworks.error = String(err);
+    } finally {
+      autoRunning = false;
+      metaProgress = null;
+    }
+  }
+
+  async function stopAuto(): Promise<void> {
+    try {
+      await api.stopMetaFetch();
+    } catch (err) {
+      artworks.error = String(err);
+    }
+  }
+
+  /** 把秒数说成人话。 */
+  function formatEta(seconds: number): string {
+    if (seconds < 60) return `${seconds} 秒`;
+    const minutes = Math.round(seconds / 60);
+    if (minutes < 60) return `${minutes} 分钟`;
+    return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+  }
+
+  /** 清掉「已删除」标记，让它们重新进入待补全。 */
+  async function resetMissing(): Promise<void> {
+    try {
+      const cleared = await api.resetMissingMeta();
+      await refreshTaxonomy();
+      artworks.error = null;
+      artworks.notice = `已把 ${cleared} 条「已删除」放回待补全，下次批量会重新尝试`;
+    } catch (err) {
+      artworks.error = String(err);
     }
   }
 
@@ -510,6 +588,15 @@
     {#if metaStats}
       <span class="tabular-nums">
         已补全 <span class="font-semibold text-accent-400">{metaStats.done}</span>
+        {#if metaStats.missing > 0}
+          · Pixiv 已删除
+          <span
+            class="text-muted"
+            title="这个作品在 Pixiv 上返回 404（作者删除 / 转私密 / 下架）。**本地文件完全没动**，只是 Pixiv 那一侧没了。这是终态，不再重抓。"
+          >
+            {metaStats.missing}
+          </span>
+        {/if}
         · 失败 <span class:text-amber-400={metaStats.failed > 0}>{metaStats.failed}</span>
         · 待补全 <span class="font-semibold text-soft">{metaStats.pending}</span>
       </span>
@@ -530,31 +617,84 @@
       {proxySaved ? "已保存" : "保存代理"}
     </button>
 
-    <button
-      type="button"
-      class="cursor-pointer rounded-md bg-accent-600 px-3 py-1 text-xs font-medium text-on-accent transition hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-60"
-      disabled={metaBusy || metaStats?.pending === 0}
-      onclick={fetchBatch}
-    >
-      {#if metaBusy && metaProgress}
-        抓取中 {metaProgress.processed}/{metaProgress.total}
-      {:else if metaBusy}
-        抓取中…
-      {:else if metaStats?.pending === 0}
-        已全部补全
-      {:else}
-        补全 100 条元数据
-      {/if}
-    </button>
+    {#if autoRunning}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border border-rose-600 bg-rose-600/90 px-3 py-1 text-xs font-medium text-white transition hover:bg-rose-500"
+        onclick={stopAuto}
+      >
+        停止
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md bg-accent-600 px-3 py-1 text-xs font-medium text-on-accent transition hover:bg-accent-500 disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={metaBusy || metaStats?.pending === 0}
+        onclick={startAuto}
+        title="一批接一批跑完剩下的全部。限流参数和手动点一样，另外每 200 条歇 30 秒。"
+      >
+        {#if metaStats?.pending === 0}
+          已全部补全
+        {:else}
+          自动补全剩下的 {metaStats?.pending ?? 0} 条
+        {/if}
+      </button>
+
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border border-surface-700 px-3 py-1 text-xs text-soft transition hover:border-surface-600 hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
+        disabled={metaBusy || metaStats?.pending === 0}
+        onclick={fetchBatch}
+      >
+        {#if metaBusy && metaProgress}
+          抓取中 {metaProgress.processed}/{metaProgress.total}
+        {:else if metaBusy}
+          抓取中…
+        {:else}
+          补全 100 条
+        {/if}
+      </button>
+    {/if}
+
+    {#if metaStats && metaStats.missing > 0}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border border-surface-700 px-2 py-0.5 text-[11px] text-muted transition hover:border-surface-600 hover:text-fg"
+        title="Pixiv 对「删除了」和「转私密了」都返回 404，无法区分。私密作品以后可能放回来，所以这里可以清掉标记让它们重新进入待补全。本地文件不受影响。"
+        onclick={resetMissing}
+      >
+        重查 Pixiv 上已删除的 {metaStats.missing} 条
+      </button>
+    {/if}
+
+    {#if autoRunning && overall.total > 0}
+      <!-- 整轮进度条。宽一点、显眼一点，因为它一跑就是几十分钟 -->
+      <div class="flex min-w-64 flex-1 items-center gap-2">
+        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-700">
+          <div
+            class="h-full rounded-full bg-accent-500 transition-[width] duration-300"
+            style="width: {Math.min(100, (overall.done * 100) / overall.total)}%"
+          ></div>
+        </div>
+        <span class="shrink-0 tabular-nums text-soft">
+          {overall.done}/{overall.total}
+        </span>
+        {#if eta !== null}
+          <span class="shrink-0 tabular-nums text-mark">还需约 {formatEta(eta)}</span>
+        {/if}
+      </div>
+    {/if}
 
     {#if lastBatch}
       <span class="tabular-nums">
         本批：成功 <span class="text-accent-400">{lastBatch.fetched}</span>
-        · 已删除 {lastBatch.missing}
+        · Pixiv 已删除 {lastBatch.missing}
         {#if lastBatch.failed > 0}
           · 失败 <span class="text-amber-400">{lastBatch.failed}</span>
         {/if}
-        {#if lastBatch.rateLimited}
+        {#if lastBatch.stopped}
+          <span class="text-mark">· 已停止（进度已保存，再点一次接着补）</span>
+        {:else if lastBatch.rateLimited}
           <span class="text-rose-400">
             · 被 Pixiv 限流，已立刻停止 —— 过一阵再补，别连续点
           </span>
@@ -696,5 +836,19 @@
       selectedIndex = null;
     }}
     onnavigate={(delta) => void navigate(delta)}
+    onfilterartist={(uid) => {
+      // 只看这一位画师：收掉弹窗，把筛选条上的画师也同步过去
+      selected = null;
+      selectedIndex = null;
+      artworks.artistUids = [uid];
+      void applyFilter();
+    }}
+    onfiltertag={(tag) => {
+      // 标签同理：收掉弹窗并让筛选条上的胶囊也亮起来
+      selected = null;
+      selectedIndex = null;
+      artworks.pixivTags = [tag];
+      void applyFilter();
+    }}
   />
 {/if}

@@ -10,6 +10,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api, SCAN_PROGRESS_EVENT } from "./api";
 import type {
   Album,
+  Orientation,
   CacheUsage,
   Image,
   Library,
@@ -24,7 +25,17 @@ export type Selection =
   | { kind: "favorites" }
   | { kind: "library"; id: number }
   | { kind: "album"; id: number }
-  | { kind: "tag"; id: number };
+  | { kind: "tag"; id: number }
+  /**
+   * 按画师筛选。画师从路径反推（见 `crate::artists`），不需要联网。
+   * `name` 只用于显示 —— 分组永远按 `uid`，因为同一个 uid 可能有多个历史名字。
+   */
+  | { kind: "artist"; uid: string; name: string }
+  /**
+   * 按 Pixiv 官方标签筛选。标签来自联网补全的元数据，与主人自己打的标签
+   * （`kind: "tag"`，挂在 `image_tags` 上）是两套东西，不要混。
+   */
+  | { kind: "pixivTag"; tag: string };
 
 const PAGE_SIZE = 120;
 
@@ -45,6 +56,8 @@ class GalleryStore {
   sortBy = $state<SortBy>("modifiedAt");
   sortDesc = $state(true);
   minimumRating = $state(0);
+  /** 画幅筛选。`null` = 不限。 */
+  orientation = $state<Orientation | null>(null);
 
   scanning = $state(false);
   scanProgress = $state<ScanProgress | null>(null);
@@ -71,6 +84,10 @@ class GalleryStore {
         return this.albums.find((item) => item.id === selection.id)?.name ?? "相册";
       case "tag":
         return this.tags.find((item) => item.id === selection.id)?.name ?? "标签";
+      case "artist":
+        return `画师：${selection.name}`;
+      case "pixivTag":
+        return `标签：${selection.tag}`;
       default:
         return "全部图片";
     }
@@ -117,6 +134,7 @@ class GalleryStore {
       sortBy: this.sortBy,
       sortDesc: this.sortDesc,
       minimumRating: this.minimumRating > 0 ? this.minimumRating : null,
+      orientation: this.orientation,
       limit: PAGE_SIZE,
       offset,
     };
@@ -128,6 +146,10 @@ class GalleryStore {
         return { ...base, albumId: selection.id };
       case "tag":
         return { ...base, tagId: selection.id };
+      case "artist":
+        return { ...base, artistUids: [selection.uid] };
+      case "pixivTag":
+        return { ...base, pixivTags: [selection.tag] };
       case "favorites":
         return { ...base, favoritesOnly: true };
       default:

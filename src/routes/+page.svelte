@@ -51,7 +51,20 @@
 </div>
 
 {#if opened}
-  <Lightbox image={opened} onclose={() => (opened = null)} onnavigate={navigate} />
+  <Lightbox
+    image={opened}
+    onclose={() => (opened = null)}
+    onnavigate={navigate}
+    onfilterartist={(uid, name) => {
+      // 先关弹窗再切筛选：弹窗打开时列表在它下面，切了也看不见
+      opened = null;
+      gallery.select({ kind: "artist", uid, name });
+    }}
+    onfiltertag={(tag) => {
+      opened = null;
+      gallery.select({ kind: "pixivTag", tag });
+    }}
+  />
 {/if}
 
 {#if gallery.error || gallery.notice}

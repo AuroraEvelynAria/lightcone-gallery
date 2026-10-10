@@ -4,6 +4,7 @@
 //! 所有涉及数据库 / 图像解码的操作统一走 `tauri::async_runtime::spawn_blocking`。
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
@@ -14,6 +15,12 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     /// 缩略图缓存根目录（app data 下）
     pub thumbnail_dir: PathBuf,
+    /// 自动补全元数据是否还在跑。
+    ///
+    /// 那个循环一次要跑几十分钟，必须有办法中途叫停 —— `stop_meta_fetch` 把它翻成
+    /// `false`，循环每抓完一批检查一次。放在这里而不是前端：真正的循环在 Rust 这边，
+    /// 前端的「停止」只是个信号，能停下来的前提是循环自己愿意看这个标志。
+    pub meta_running: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -21,6 +28,7 @@ impl AppState {
         Self {
             db: Arc::new(Mutex::new(conn)),
             thumbnail_dir,
+            meta_running: Arc::new(AtomicBool::new(false)),
         }
     }
 }

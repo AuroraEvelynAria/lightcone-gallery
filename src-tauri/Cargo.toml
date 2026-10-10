@@ -42,6 +42,7 @@ thiserror = "2"
 webp = "0.3"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "default-tls"] }
 tokio = { version = "1.53.2", default-features = false, features = ["time"] }
+tauri-plugin-clipboard-manager = "2.4.1"
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

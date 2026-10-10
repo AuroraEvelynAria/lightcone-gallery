@@ -154,11 +154,35 @@ export const api = {
    */
   fetchMissingMeta: (limit?: number) =>
     invoke<MetaBatch>("fetch_missing_meta", { limit: limit ?? null }),
+  /**
+   * 自动补全：一批接一批跑到没有待补全的为止。
+   *
+   * **不会比手动点更激进** —— 同样的 800ms 间隔、非 200 不重试、撞限流立刻整轮停，
+   * 只是多了「每 200 条歇 30 秒」的规律停顿，以及随时可停。
+   * 进度通过 `META_PROGRESS_EVENT` 推送（带整轮的 overallDone / overallTotal）。
+   */
+  fetchAllMeta: () => invoke<MetaBatch>("fetch_all_meta"),
+  /**
+   * 把一张原图写进系统剪贴板。
+   *
+   * 为什么不用 WebView2 右键菜单里的「复制图片」：它靠图片 URL 去取字节，
+   * 而我们的图走自定义 `asset://` 协议，它取不到，点了没反应。
+   */
+  copyImage: (path: string) => invoke<void>("copy_image_to_clipboard", { path }),
+  /** 叫停自动补全。最多再抓完当前这批就停。返回当时是否在跑。 */
+  stopMetaFetch: () => invoke<boolean>("stop_meta_fetch"),
   /** 按标签统计，倒序。标签只能联网取到。 */
   listPixivTags: (limit?: number) =>
     invoke<TagCount[]>("list_pixiv_tags", { limit: limit ?? null }),
-  /** 元数据覆盖情况（已补全 / 失败 / 待补全）。 */
+  /** 元数据覆盖情况（已补全 / 已删除 / 失败 / 待补全）。 */
   pixivMetaStats: () => invoke<MetaStats>("pixiv_meta_stats"),
+  /**
+   * 把「已删除」标记清掉，让它们重新进入待补全。
+   *
+   * Pixiv 对「删除了」和「转私密了」都返回 404，无法区分；私密作品以后可能放回来，
+   * 所以终态不该是单向门。返回清掉的条数。
+   */
+  resetMissingMeta: () => invoke<number>("reset_missing_meta"),
   /**
    * 取一条作品的 Pixiv 侧信息（标题 / 画师 / 官方标签），供检视弹窗显示。
    * 返回 null 表示这条还没补全过元数据 —— 界面要显示「还没取过」而不是「没有标签」。

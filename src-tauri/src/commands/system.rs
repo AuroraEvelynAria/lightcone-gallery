@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rusqlite::params;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::models::Stats;
 use crate::error::{AppError, AppResult};
@@ -152,4 +152,32 @@ pub async fn save_settings(
         Ok(())
     })
     .await
+}
+
+/// 把一张原图写进系统剪贴板。
+///
+/// ## 为什么需要它
+///
+/// WebView2 右键菜单里的「复制图片」在本应用里点了没反应 —— 它要靠图片的 URL
+/// 去取字节，而我们的图走的是自定义 `asset://` 协议，它取不到。所以自己来：
+/// 从 Rust 直接读文件、解码、写剪贴板，不依赖 WebView2 怎么实现。
+///
+/// 解码放在阻塞线程池上：一张 4000×6000 的图解码要一两秒，占住 async runtime
+/// 会卡住别的命令。
+#[tauri::command]
+pub async fn copy_image_to_clipboard(app: AppHandle, path: String) -> AppResult<()> {
+    let (rgba, width, height) = tauri::async_runtime::spawn_blocking(move || {
+        let decoded = image::open(&path)?;
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        Ok::<_, AppError>((rgba.into_raw(), width, height))
+    })
+    .await
+    .map_err(|err| AppError::Other(format!("解码任务失败: {err}")))??;
+
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard()
+        .write_image(&tauri::image::Image::new_owned(rgba, width, height))
+        .map_err(|err| AppError::Other(format!("写入剪贴板失败: {err}")))?;
+    Ok(())
 }

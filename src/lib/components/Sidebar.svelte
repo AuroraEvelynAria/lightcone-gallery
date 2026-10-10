@@ -6,13 +6,25 @@
   let creating = $state<"album" | "tag" | null>(null);
   let draftName = $state("");
 
+  // 逐种列出来而不是 `current.id === target.id`：画师那一支没有 `id`（用 `uid`），
+  // 统一写会让类型收窄失败。列全了还有个好处 —— 以后加新维度时忘了处理会直接报错。
   function isActive(target: Selection): boolean {
     const current = gallery.selection;
-    if (target.kind === "all" || target.kind === "favorites") {
-      return current.kind === target.kind;
+    switch (target.kind) {
+      case "all":
+      case "favorites":
+        return current.kind === target.kind;
+      case "library":
+        return current.kind === "library" && current.id === target.id;
+      case "album":
+        return current.kind === "album" && current.id === target.id;
+      case "tag":
+        return current.kind === "tag" && current.id === target.id;
+      case "artist":
+        return current.kind === "artist" && current.uid === target.uid;
+      case "pixivTag":
+        return current.kind === "pixivTag" && current.tag === target.tag;
     }
-    if (current.kind !== target.kind) return false;
-    return current.id === target.id;
   }
 
   async function submitDraft(): Promise<void> {

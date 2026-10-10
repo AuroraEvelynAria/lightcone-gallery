@@ -16,11 +16,17 @@
     artwork,
     onclose,
     onnavigate,
+    onfilterartist,
+    onfiltertag,
   }: {
     artwork: Artwork;
     onclose: () => void;
     /** 上一张 / 下一张。作品库里翻页要等对应数据块到位，所以是异步的 */
     onnavigate?: (delta: number) => void;
+    /** 点画师名：只看这位画师的作品 */
+    onfilterartist?: (uid: string, name: string) => void;
+    /** 点官方标签：只看带这个标签的作品 */
+    onfiltertag?: (tag: string) => void;
   } = $props();
 
   /** Pixiv 侧的信息（标题 / 画师 / 官方标签）。null 表示还没补全过元数据。 */
@@ -50,7 +56,7 @@
 </script>
 
 <div
-  class="fixed inset-0 z-50 flex flex-col bg-black/88 backdrop-blur-sm"
+  class="viewer-shell fixed inset-0 z-50 flex flex-col backdrop-blur-sm"
   role="dialog"
   aria-modal="true"
   aria-label={`作品 ${artwork.pid} 第 ${artwork.page} 页`}
@@ -85,11 +91,14 @@
       class="relative z-10 flex flex-wrap items-center gap-1.5 border-b border-surface-800/60 px-5 py-2"
     >
       {#each illust.tags as tag (tag)}
-        <span
-          class="rounded-full border border-surface-700 bg-surface-900/60 px-2 py-0.5 text-[11px] text-soft"
+        <button
+          type="button"
+          class="cursor-pointer rounded-full border border-surface-700 bg-surface-900/60 px-2 py-0.5 text-[11px] text-soft transition hover:border-accent-500 hover:text-accent-400"
+          title="只看带「{tag}」的作品"
+          onclick={() => onfiltertag?.(tag)}
         >
           {tag}
-        </span>
+        </button>
       {/each}
     </div>
   {/if}
@@ -99,13 +108,46 @@
       src={convertFileSrc(artwork.originalPath)}
       alt={`${artwork.pid} p${artwork.page}`}
       failurePath={artwork.originalPath}
+      copyPath={artwork.originalPath}
       {onclose}
       {onnavigate}
     >
+      <!-- 照片下面展示 Pixiv 信息，不展示本地文件名（理由见 Lightbox.svelte） -->
       {#snippet meta()}
         <span class="viewer-chip">p{artwork.page}</span>
-        <span class="viewer-caption" data-selectable>{artwork.originalPath}</span>
+        {#if illust}
+          {@const info = illust}
+          <span class="viewer-caption" data-selectable>{info.title}</span>
+          <button
+            type="button"
+            class="viewer-artist"
+            title="只看 {info.artistName} 的作品"
+            onclick={() => onfilterartist?.(info.artistUid, info.artistName)}
+          >
+            {info.artistName}
+          </button>
+          {#if info.artistAccount}
+            <span class="viewer-caption">@{info.artistAccount}</span>
+          {/if}
+        {:else}
+          <span class="viewer-caption">还没取过元数据（PID {artwork.pid}）</span>
+        {/if}
       {/snippet}
     </ImageViewer>
   </div>
 </div>
+
+<style lang="postcss">
+  @reference "../../app.css";
+
+  /*
+    背幕跟着主题走，不写死黑色。
+
+    写死 `bg-black/88` 时，浅色主题下整个弹窗的文字都是深色 —— 深字压深底，
+    读不出来。主人用的就是浅色主题（COLD FRONT light），抱怨的正是这个。
+    弹窗里的头部、标签、信息行全部用主题色，背幕也必须跟着，否则它们没救了。
+  */
+  .viewer-shell {
+    background: color-mix(in oklab, var(--tone-bg) 88%, transparent);
+  }
+</style>

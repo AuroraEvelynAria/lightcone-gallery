@@ -1,3 +1,41 @@
+<script module lang="ts">
+  import { api } from "$lib/api";
+
+  /**
+   * 光锥视差特效的总开关，**两个弹窗共用一份**（放在 module 里）。
+   *
+   * 关掉之后弹窗变成朴素的平面显示：不倾斜、不扫光、不发光、不入场动画。
+   * 状态存在 `settings.viewer_effects` 里，重启后还在。
+   */
+  let effectsEnabled = $state(true);
+  let effectsLoaded = false;
+
+  /** 只读一次设置，之后靠内存里的值。 */
+  export async function ensureEffectsLoaded(): Promise<void> {
+    if (effectsLoaded) return;
+    effectsLoaded = true;
+    try {
+      const settings = await api.loadSettings();
+      if (settings["viewer_effects"] === "0") effectsEnabled = false;
+    } catch {
+      // 读不到就用默认值（开着），不该因为一个偏好读失败而影响看图
+    }
+  }
+
+  export function toggleEffects(): void {
+    effectsEnabled = !effectsEnabled;
+    void api
+      .saveSettings({ viewer_effects: effectsEnabled ? "1" : "0" })
+      .catch(() => {
+        // 存不下不影响这次会话，下次启动回到默认值
+      });
+  }
+
+  export function effectsOn(): boolean {
+    return effectsEnabled;
+  }
+</script>
+
 <script lang="ts">
   /**
    * 图片查看器内核：三层嵌套光锥视差 + 缩放平移 + 全屏。纯 CSS 3D，无 WebGL。
@@ -10,14 +48,16 @@
    * ```
    * .viewer                固定全屏 + 背幕
    *   .viewer__stage       perspective: 900px（只此一处）
-   *     .viewer__frame     量尺寸用的盒子，卡片在它里面居中
-   *       .viewer__scene   入场动画（缩放 + 轻微翻转）
-   *         .viewer__card  preserve-3d，跟鼠标做 rotateX / rotateY
-   *           .viewer__halo   translateZ(-64px)  光锥底（背光场）
-   *           .viewer__shot   translateZ(0)      原图（圆角裁切在这层）
-   *           .viewer__glare  translateZ(24px)   扫光（overlay）
-   *           .viewer__sheen  translateZ(26px)   斜光（color-dodge）
-   *           .viewer__meta   translateZ(64px)   前景信息
+   *     .viewer__frame     量「去掉留白的整块」；放大时框最多撑到这里
+   *       .viewer__inner   量「带留白的区域」；1× 的适应尺寸按它算
+   *         .viewer__stack 竖排：卡片在上，信息行在下
+   *           .viewer__scene   入场动画（缩放 + 轻微翻转）
+   *             .viewer__card  preserve-3d，跟鼠标做 rotateX / rotateY
+   *               .viewer__halo   translateZ(-64px)  光锥底（背光场）
+   *               .viewer__shot   translateZ(0)      原图（圆角裁切在这层）
+   *               .viewer__glare  translateZ(24px)   扫光（overlay）
+   *               .viewer__sheen  translateZ(26px)   斜光（color-dodge）
+   *           .viewer__meta    普通布局，**不在 3D 层里**（见下）
    * ```
    *
    * ## 两条必须守住的规则
@@ -63,6 +103,8 @@
     onfullscreen?: (value: boolean) => void;
     /** 加载失败时展示的路径，方便主人自己去磁盘上找 */
     failurePath?: string;
+    /** 原图在磁盘上的路径。给了就在工具条上多一个「复制图片」按钮 */
+    copyPath?: string;
   }
 
   let {
@@ -74,6 +116,7 @@
     onnavigate,
     onfullscreen,
     failurePath,
+    copyPath,
   }: Props = $props();
 
   /** 最大倾角。卡牌类效果常用 ±14°，检视大图收敛到 7° 更稳。 */
@@ -88,15 +131,24 @@
   const ZOOM_SETTLE = 0.05;
   /** 放大上限。再往上就是马赛克了，没有意义。 */
   const MAX_ZOOM = 8;
-  /** 滚轮灵敏度：deltaY 每 1px 乘 exp(0.0015)，一格标准滚轮约 ×1.19。 */
-  const WHEEL_SENSITIVITY = 0.0015;
-  /** 双击放到的倍率。 */
-  const DOUBLE_CLICK_ZOOM = 2.5;
+  /** 滚轮灵敏度：deltaY 每 1px 乘 exp(0.001)，一格标准滚轮约 ×1.11。 */
+  const WHEEL_SENSITIVITY = 0.001;
+  /**
+   * 从「适应窗口」起步的第一格倍率。
+   *
+   * 一滚轮通常是「想放大看」，所以第一格多走一点（到 130%），之后每格才是细步。
+   * 主人反馈过「轻轻一推滚轮就是 207%，太灵敏」—— 那 207% 来自「一放大就铺满」
+   * 那套（第一格会额外乘上 coverScale）。现在铺满交给双击，滚轮只负责细腻。
+   */
+  const FIRST_STEP = 1.3;
   /** 拖拽超过这个距离就不算「点击」，避免拖完顺手把弹窗关了。 */
   const DRAG_SLOP = 5;
 
   let stage = $state<HTMLElement | null>(null);
+  /** 外层：量「去掉四周留白」的整块可用区域 */
   let frame = $state<HTMLElement | null>(null);
+  /** 内层：量「带留白」的区域，1× 时图片按它算适应尺寸 */
+  let inner = $state<HTMLElement | null>(null);
   let shot = $state<HTMLElement | null>(null);
 
   let loaded = $state(false);
@@ -105,13 +157,36 @@
 
   /** 原图像素尺寸，`onload` 时才拿得到。 */
   let natural = $state({ w: 0, h: 0 });
-  /** `.viewer__frame` 的内容区尺寸，由 ResizeObserver 喂。 */
+  /** 带留白的可用区域。1× 的适应尺寸按它算。 */
   let box = $state({ w: 0, h: 0 });
+  /** 去掉留白的整块区域。放大时显示框最多撑到这里 —— 这就是「去掉四周留白」。 */
+  let full = $state({ w: 0, h: 0 });
+
+  /**
+   * 信息行占的高度。
+   *
+   * CSS 里给它固定高度 + 单行省略，这里才敢当常量用 —— 否则「图片 + 信息行」
+   * 会比可用区域高，信息行被挤出画面外。
+   */
+  const CAPTION_H = 30;
+  /** 图片与信息行之间的间距（`.viewer__stack` 的 gap，0.5rem）。 */
+  const STACK_GAP = 8;
+  /**
+   * `.viewer__inner` 在 100% 时的上内边距（CSS 里的 1rem）。
+   *
+   * 只用来算「100% ↔ 放大」那一步显示框中心的纵向位移（差 `PAD_TOP / 2`，见
+   * `centerShiftY`）。放大态的该内边距是 0，所以这里取的是 100% 那一侧的值。
+   */
+  const PAD_TOP = 16;
+  let captionH = $derived(meta ? CAPTION_H : 0);
+  /** 底部留白。它**不是**可以吃掉的「留白」—— 工具条就住在那儿。 */
+  let padBottom = 0;
 
   /** 缩放的显示尺寸。**只缩不放**：小图保持原尺寸，免得糊。 */
   let fit = $derived.by(() => {
-    if (!natural.w || !natural.h || !box.w || !box.h) return { w: 0, h: 0 };
-    const k = Math.min(box.w / natural.w, box.h / natural.h, 1);
+    const availH = box.h - captionH;
+    if (!natural.w || !natural.h || !box.w || availH <= 0) return { w: 0, h: 0 };
+    const k = Math.min(box.w / natural.w, availH / natural.h, 1);
     return { w: Math.round(natural.w * k), h: Math.round(natural.h * k) };
   });
 
@@ -137,14 +212,32 @@
   // 目标值：事件处理器只改这里，由 rAF 统一插值（高频事件里绝不直接写样式）
   let target = { rx: 0, ry: 0, gx: 50, gy: 50, scale: 1, tx: 0, ty: 0 };
   let frameId = 0;
+  /** 上一次写进 DOM 的框尺寸，用来跳过没必要的布局。 */
+  let lastFrame = { w: 0, h: 0 };
 
   /** 显示用的倍率，只在整数变化时才写，避免每帧重渲染。 */
   let zoomPercent = $state(100);
   let zoomed = $state(false);
 
   let dragging = $state(false);
+  /**
+   * 「复制图片」的反馈状态。
+   *
+   * 主人反馈过「右键菜单里有复制图片但点了没反应」—— 静默失败正是问题所在，
+   * 所以这里成功失败都要看得见：成功打勾，失败变红并把原因放进 tooltip。
+   */
+  let copyState = $state<"idle" | "copying" | "done" | "failed">("idle");
+  let copyError = $state("");
   let dragStart = { x: 0, y: 0, tx: 0, ty: 0 };
   let dragged = 0;
+  /**
+   * 这次按下落在「空白」/「图片」上，给 `click` / `dblclick` 判断用。
+   *
+   * 刻意不是 `$state`：只在事件处理器之间传值，不驱动渲染。为什么不能用事件自己
+   * 的 `target`，见 `isBlank`。
+   */
+  let pressedOnBlank = false;
+  let pressedOnPhoto = false;
 
   /** 系统是否要求减少动效。 */
   const calm = $derived(
@@ -165,9 +258,9 @@
       return;
     }
 
-    // 放大之后鼠标负责平移，再叠倾斜就晕了
+    // 放大之后鼠标负责平移，再叠倾斜就晕了；特效关掉时也完全不动
     const node = frame;
-    if (!node || calm || zoomed) return;
+    if (!node || calm || zoomed || !effectsEnabled) return;
 
     const rect = node.getBoundingClientRect();
     const px = ((event.clientX - rect.left) / rect.width) * 100;
@@ -207,6 +300,16 @@
       shotNode.style.setProperty("--s", String(scale));
       shotNode.style.setProperty("--tx", `${tx}px`);
       shotNode.style.setProperty("--ty", `${ty}px`);
+      // 框尺寸写 width/height 而不是 scale()：scale 会把圆角一起放大。
+      // 只在整数像素变化时才写，避免每帧都触发布局。
+      const size = frameSize(scale);
+      const w = Math.round(size.w);
+      const h = Math.round(size.h);
+      if (w !== lastFrame.w || h !== lastFrame.h) {
+        lastFrame = { w, h };
+        shotNode.style.width = `${w}px`;
+        shotNode.style.height = `${h}px`;
+      }
     }
   }
 
@@ -257,6 +360,53 @@
   }
 
   /**
+   * 显示框最多能长到多大。
+   *
+   * - 横向：`full.w` —— 左右留白确实可以吃掉。
+   * - 纵向：`full.h - 底部留白 - 信息行 - 间距`。底部那截不是留白，工具条住在那儿；
+   *   信息行也在图片下面，两者都要占高度。漏扣的后果很直观：框长过头，
+   *   把信息行挤出画面外（真的踩过）。
+   */
+  function maxFrame(): { w: number; h: number } {
+    return {
+      w: full.w,
+      h: Math.max(0, full.h - padBottom - captionH - STACK_GAP),
+    };
+  }
+
+  /**
+   * 显示框（裁切框）在某个倍率下的大小。
+   *
+   * **框跟着图片一起长**：`fit * scale`，长到「去掉留白的整块」为止，再往上就在
+   * 框内裁切。这样图片永远正好填满框 —— 框里绝不会露背景；四周那圈留白是卡片
+   * 自己的边距，会随着放大被一格格吃掉。
+   *
+   * 之前这里是**硬切**的（100% 贴着图，一放大直接占满整块）：主人当时嫌「放大到
+   * 一半四周还露着背景」，可硬切又让第一格滚轮必然跳到 `cover` 那么远（实测
+   * 207%），反倒嫌「太灵敏」。现在框连续长，两头就都顺了。
+   */
+  function frameSize(value: number): { w: number; h: number } {
+    const cap = maxFrame();
+    return {
+      w: Math.min(fit.w * value, cap.w),
+      h: Math.min(fit.h * value, cap.h),
+    };
+  }
+
+  /**
+   * 「正好铺满」的倍率：图片刚好盖住整块区域，一点不裁。
+   *
+   * 竖向图、横向图、方图各不相同（实测 137% ~ 200%），所以它是个算出来的值，
+   * 不是常量。双击就落到这里 —— 滚轮一格格爬上去的终点也是这里。
+   */
+  function coverScale(): number {
+    if (!fit.w || !fit.h) return 1;
+    const cap = maxFrame();
+    if (cap.w <= 0 || cap.h <= 0) return 1;
+    return Math.max(cap.w / fit.w, cap.h / fit.h, 1);
+  }
+
+  /**
    * 一次性写入缩放与位移，并把位移夹在「图片边缘不越过裁切框」的范围内。
    *
    * 图片在倍率 s 下比裁切框大出的部分是 `fit * (s - 1)`，两边各分一半，
@@ -264,8 +414,18 @@
    */
   function apply(nextScale: number, nextTx: number, nextTy: number): void {
     const next = clamp(nextScale, 1, MAX_ZOOM);
-    const maxX = (fit.w * (next - 1)) / 2;
-    const maxY = (fit.h * (next - 1)) / 2;
+    // 跨过 100% 这条线时把倾斜归零。放大后鼠标改去负责平移（见 `onpointermove`），
+    // 倾斜不再更新 —— 不归零的话，放大那一刻歪多少度就永久冻住多少度：画面成
+    // 梯形（上下边被压缩），四角还露出背幕。回到 100% 那一步同理。
+    if (next > 1.001 !== (scale > 1.001)) {
+      target.rx = 0;
+      target.ry = 0;
+    }
+    // 位移上限 = 图片比框大出来的部分，两边各一半。还没铺满时框正好贴着图片，
+    // 上限为 0 —— 整张都看得见，本来也没得拖。
+    const frame = frameSize(next);
+    const maxX = Math.max(0, (fit.w * next - frame.w) / 2);
+    const maxY = Math.max(0, (fit.h * next - frame.h) / 2);
     target.scale = next;
     target.tx = clamp(nextTx, -maxX, maxX);
     target.ty = clamp(nextTy, -maxY, maxY);
@@ -281,10 +441,24 @@
   }
 
   /**
+   * 「100% ↔ 放大」那一步，显示框中心的纵向位移。
+   *
+   * 100% 时竖排栈（图片 + 信息行）在内容盒里垂直居中，放大时栈正好铺满内容盒，
+   * 两个中心相差 `PAD_TOP / 2`（16px 上内边距 → 8px）。锚点里漏掉它，放大后
+   * 光标下的画面会整体偏一点；横向两态中心一致，不用管。
+   */
+  function centerShiftY(next: number): number {
+    const wasZoomed = scale > 1.001;
+    const willZoom = next > 1.001;
+    if (wasZoomed === willZoom) return 0;
+    return willZoom ? PAD_TOP / 2 : -PAD_TOP / 2;
+  }
+
+  /**
    * 以某个屏幕点为锚缩放：该点下面的画面内容保持不动。
    *
-   * 图片中心在屏幕上的位置是 `center`，内容坐标 p 的屏幕位置是
-   * `center + t + p * s`。要让 p 不动，解出新的 `t` 即可。
+   * 显示框中心在屏幕上的位置是 `center`，内容坐标 p 的屏幕位置是
+   * `center + t + p * s`（s 是**真正画出来的**倍率）。要让 p 不动，解出新的 `t`。
    */
   function zoomAt(nextScale: number, clientX: number, clientY: number): void {
     const node = shot;
@@ -292,15 +466,19 @@
       apply(nextScale, tx, ty);
       return;
     }
-    const rect = node.getBoundingClientRect();
-    // 位移不改变盒子中心、缩放以中心为原点，所以减去 tx / ty 就是未变换时的中心
-    const centerX = rect.left + rect.width / 2 - tx;
-    const centerY = rect.top + rect.height / 2 - ty;
 
     const next = clamp(nextScale, 1, MAX_ZOOM);
+    const rect = node.getBoundingClientRect();
+    // 显示框本身没被变换过（位移和缩放都加在里面那张 <img> 上），所以它的矩形
+    // 中心就是「未变换时的中心」—— 这里**不能**再减 tx / ty，那会把位移算两遍。
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    // 位移和缩放都加在里面那张 <img> 上、以它的中心为原点，所以「让光标下那点
+    // 不动」解出来就是 `t' = d - (d - t) * k`，k 是这次缩放前后真实倍率之比。
     const k = next / scale;
     const dx = clientX - centerX;
-    const dy = clientY - centerY;
+    const dy = clientY - centerY + centerShiftY(next);
     apply(next, dx - (dx - tx) * k, dy - (dy - ty) * k);
   }
 
@@ -313,13 +491,23 @@
     event.preventDefault();
     // 触控板的横向滚动不该触发缩放
     if (Math.abs(event.deltaY) < 1) return;
-    zoomAt(scale * Math.exp(-event.deltaY * WHEEL_SENSITIVITY), event.clientX, event.clientY);
+    const step = Math.exp(-event.deltaY * WHEEL_SENSITIVITY);
+    // 从「适应窗口」起步的第一格给足一点（直接到 `FIRST_STEP`）：一滚轮通常是
+    // 想放大看，多走一步更快到位；之后每格都是细步，便于微调。缩小不受影响。
+    const factor = step > 1 && scale <= 1.001 ? FIRST_STEP / scale : step;
+    zoomAt(scale * factor, event.clientX, event.clientY);
   }
 
   function onpointerdown(event: PointerEvent): void {
+    // 记下「按下时真正点在哪」，供 click / dblclick 判断（理由见 `isBlank`）。
+    // 必须在 `setPointerCapture` **之前**取 —— 捕获之后这一串鼠标事件的 target
+    // 会被改写成舞台。
+    pressedOnBlank = isBlank(event.target);
+    pressedOnPhoto = event.target instanceof HTMLImageElement;
+    // 每次按下都重新计一次「这次算不算拖拽」
+    dragged = 0;
     if (!zoomed || event.button !== 0) return;
     dragging = true;
-    dragged = 0;
     dragStart = { x: event.clientX, y: event.clientY, tx, ty };
     stage?.setPointerCapture(event.pointerId);
     event.preventDefault();
@@ -331,17 +519,34 @@
     if (stage?.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
   }
 
+  /**
+   * 按下时是否落在「空白」上：舞台，或两个量尺寸用的盒子。
+   *
+   * 判断必须用 **pointerdown 的 target**，不能用 click 的 —— 放大后
+   * `onpointerdown` 会 `setPointerCapture`，浏览器会把随后那串鼠标事件（含
+   * `click` / `dblclick`）**全部重定向到被捕获的元素**上。于是「点图片」的 click
+   * 也报成「点在舞台上」，`onstageclick` 就顺手把弹窗关了 —— 主人反馈的
+   * 「有时候点一下照片就回到主列表」正是这个。
+   */
+  function isBlank(node: EventTarget | null): boolean {
+    return node === stage || node === frame || node === inner;
+  }
+
   function ondoubleclick(event: MouseEvent): void {
-    // 只认图片上的双击。工具条上连点两下「+」会被浏览器同时派发 dblclick，
-    // 不挡住的话第二下会被当成「双击放大」，倍率直接跳到 2.5×。
-    if (!(event.target instanceof HTMLImageElement)) return;
+    // 只认**图片上**的双击：工具条上连点两下「+」会被浏览器补发 dblclick，
+    // 不挡住的话第二下会被当成「双击放大」，倍率直接跳一大截。
+    // 判据同样取 pointerdown 的落点（见 `isBlank`）—— 放大后 dblclick 的 target
+    // 会被指针捕获改写成舞台，用 `event.target` 判断会让「双击还原」在放大态失效。
+    if (!pressedOnPhoto) return;
     if (zoomed) resetZoom();
-    else zoomAt(DOUBLE_CLICK_ZOOM, event.clientX, event.clientY);
+    // 双击 = **正好铺满**：图片刚好填满整块区域，一点不裁。滚轮一格格爬上去的
+    // 终点也是这里，所以「想立刻铺满」用双击、「想微调」用滚轮，各管一段。
+    else zoomAt(coverScale(), event.clientX, event.clientY);
   }
 
   /** 点空白关闭。点在图片或工具条上不算 —— 那些地方有自己的语义。 */
-  function onstageclick(event: MouseEvent): void {
-    if (event.target !== stage || dragged > DRAG_SLOP) return;
+  function onstageclick(): void {
+    if (!pressedOnBlank || dragged > DRAG_SLOP) return;
     onclose();
   }
 
@@ -372,12 +577,36 @@
     void applyFullscreen(!fullscreen);
   }
 
+  /** 把原图写进系统剪贴板。见 `api.copyImage` 的注释（右键菜单那条路走不通）。 */
+  async function copyImage(): Promise<void> {
+    if (!copyPath || copyState === "copying") return;
+    copyState = "copying";
+    try {
+      await api.copyImage(copyPath);
+      copyState = "done";
+      setTimeout(() => {
+        if (copyState === "done") copyState = "idle";
+      }, 2000);
+    } catch (err) {
+      copyState = "failed";
+      copyError = String(err);
+      setTimeout(() => {
+        if (copyState === "failed") copyState = "idle";
+      }, 4000);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // 生命周期
   // ---------------------------------------------------------------------------
 
   // 换图：把「已加载 / 失败 / 缩放 / 姿态」全部归零。
   // 放在 $effect 而不是 `{#key}` 里，父组件就不必记得给组件加 key。
+  // 首次打开时把特效开关读回来
+  $effect(() => {
+    void ensureEffectsLoaded();
+  });
+
   $effect(() => {
     void src;
     untrack(() => {
@@ -400,16 +629,30 @@
     });
   });
 
-  // 量可用区域。窗口缩放、全屏、侧栏收起都会改它。
+  // 量两块区域。窗口缩放、全屏、侧栏收起、信息行出现/消失都会改它们。
   $effect(() => {
-    const node = frame;
-    if (!node) return;
+    const outer = frame;
+    const innerNode = inner;
+    if (!outer || !innerNode) return;
     const measure = () => {
-      box = { w: node.clientWidth, h: node.clientHeight };
+      // 外层没有 padding，clientWidth/Height 直接就是「整块」
+      full = { w: outer.clientWidth, h: outer.clientHeight };
+      // **内层的 clientWidth/Height 是含 padding 的**，必须自己扣掉才是可用区域。
+      // 忘了扣的后果很直观：图片按整块算高度，直接压到工具条上、信息行被挤出画面。
+      const style = getComputedStyle(innerNode);
+      const padX =
+        parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      const padY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      padBottom = parseFloat(style.paddingBottom);
+      box = {
+        w: Math.max(0, innerNode.clientWidth - padX),
+        h: Math.max(0, innerNode.clientHeight - padY),
+      };
     };
     measure();
     const observer = new ResizeObserver(measure);
-    observer.observe(node);
+    observer.observe(outer);
+    observer.observe(innerNode);
     return () => observer.disconnect();
   });
 
@@ -493,6 +736,7 @@
   class="viewer"
   class:is-dragging={dragging}
   class:is-zoomed={zoomed}
+  class:is-flat={!effectsEnabled}
   bind:this={stage}
   role="presentation"
   onpointermove={onpointermove}
@@ -506,41 +750,48 @@
   ondblclick={ondoubleclick}
   onclick={onstageclick}
 >
+  <!--
+    两层盒子各司其职：外层量「去掉留白的整块」，内层量「带留白的区域」。
+    放大时显示框从内层的适应尺寸长到外层那么大，留白就是这样被吃掉的。
+  -->
   <div class="viewer__frame" bind:this={frame}>
-    {#if failed}
-      <div class="viewer__failure">
-        <p class="viewer__failure-title">原图加载失败，文件可能已被移动或删除：</p>
-        <p class="viewer__failure-path" data-selectable>{failurePath ?? src}</p>
-      </div>
-    {:else}
-      <div class="viewer__scene">
-        <div class="viewer__card">
-          <!-- 光锥底：背光场 -->
-          <div class="viewer__halo"></div>
+    <div class="viewer__inner" bind:this={inner}>
+      {#if failed}
+        <div class="viewer__failure">
+          <p class="viewer__failure-title">原图加载失败，文件可能已被移动或删除：</p>
+          <p class="viewer__failure-path" data-selectable>{failurePath ?? src}</p>
+        </div>
+      {:else}
+        <!-- 竖排：卡片在上，信息行在下。信息**不进 3D 卡片**，
+             免得压在图上、跟着倾斜、还要靠深色渐变垫底才看得清。 -->
+        <div class="viewer__stack">
+          <div class="viewer__scene">
+            <div class="viewer__card">
+              <!-- 光锥底：背光场 -->
+              <div class="viewer__halo"></div>
 
-          <!-- 主体。圆角裁切只能在这一层，缩放只能在内层的 img 上（见文件头） -->
-          <div
-            class="viewer__shot"
-            bind:this={shot}
-            style={fit.w > 0 ? `width: ${fit.w}px; height: ${fit.h}px;` : ""}
-          >
-            <img
-              {src}
-              {alt}
-              draggable="false"
-              class="viewer__img {loaded ? 'is-loaded' : ''}"
-              onload={(event) => {
-                const node = event.currentTarget as HTMLImageElement;
-                natural = { w: node.naturalWidth, h: node.naturalHeight };
-                loaded = true;
-              }}
-              onerror={() => (failed = true)}
-            />
+              <!-- 主体。圆角裁切只能在这一层，缩放只能在内层的 img 上（见文件头） -->
+              <div class="viewer__shot" bind:this={shot}>
+                <img
+                  {src}
+                  {alt}
+                  draggable="false"
+                  class="viewer__img {loaded ? 'is-loaded' : ''}"
+                  style={fit.w > 0 ? `width: ${fit.w}px; height: ${fit.h}px;` : ""}
+                  onload={(event) => {
+                    const node = event.currentTarget as HTMLImageElement;
+                    natural = { w: node.naturalWidth, h: node.naturalHeight };
+                    loaded = true;
+                  }}
+                  onerror={() => (failed = true)}
+                />
+              </div>
+
+              <!-- 扫光（叶子节点，允许 mix-blend-mode） -->
+              <div class="viewer__glare"></div>
+              <div class="viewer__sheen"></div>
+            </div>
           </div>
-
-          <!-- 扫光（叶子节点，允许 mix-blend-mode） -->
-          <div class="viewer__glare"></div>
-          <div class="viewer__sheen"></div>
 
           {#if meta}
             <div class="viewer__meta">
@@ -548,8 +799,8 @@
             </div>
           {/if}
         </div>
-      </div>
-    {/if}
+      {/if}
+    </div>
   </div>
 
   {#if !loaded && !failed}
@@ -615,6 +866,70 @@
 
       <span class="viewer__divider"></span>
 
+      {#if copyPath}
+        <button
+          type="button"
+          class="viewer__tool {copyState === 'done' ? 'is-on' : ''} {copyState === 'failed'
+            ? 'is-failed'
+            : ''}"
+          aria-label={copyState === "done" ? "已复制" : "复制图片"}
+          title={copyState === "done"
+            ? "已复制到剪贴板"
+            : copyState === "failed"
+              ? `复制失败：${copyError}`
+              : "复制图片到剪贴板"}
+          onclick={copyImage}
+        >
+          {#if copyState === "done"}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="size-4">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+            </svg>
+          {:else if copyState === "failed"}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />
+            </svg>
+          {:else}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M8 7V5a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2h-2M6 8h8a2 2 0 012 2v8a2 2 0 01-2 2H6a2 2 0 01-2-2v-8a2 2 0 012-2z"
+              />
+            </svg>
+          {/if}
+        </button>
+      {/if}
+
+      <button
+        type="button"
+        class="viewer__tool {effectsEnabled ? 'is-on' : ''}"
+        aria-label={effectsEnabled ? "关闭光锥特效" : "开启光锥特效"}
+        aria-pressed={effectsEnabled}
+        title={effectsEnabled ? "关闭光锥特效（鼠标倾斜 + 扫光）" : "开启光锥特效"}
+        onclick={toggleEffects}
+      >
+        {#if effectsEnabled}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M12 3v2m0 14v2M5.6 5.6l1.4 1.4m10 10l1.4 1.4M3 12h2m14 0h2M5.6 18.4l1.4-1.4m10-10l1.4-1.4"
+            />
+            <circle cx="12" cy="12" r="3.5" />
+          </svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M12 3v2m0 14v2M5.6 5.6l1.4 1.4m10 10l1.4 1.4M3 12h2m14 0h2M5.6 18.4l1.4-1.4m10-10l1.4-1.4"
+            />
+            <circle cx="12" cy="12" r="3.5" />
+            <path stroke-linecap="round" d="M4 20L20 4" />
+          </svg>
+        {/if}
+      </button>
+
       <button
         type="button"
         class="viewer__tool {fullscreen ? 'is-on' : ''}"
@@ -656,8 +971,6 @@
   .viewer {
     position: absolute;
     inset: 0;
-    /* 下边留出工具条的位置 */
-    padding: 1rem 1rem 4.5rem;
     /* 大图约 60vh 高，1.5× 是「能明显看出景深但不变形」的档位 */
     perspective: 900px;
     perspective-origin: 50% 50%;
@@ -667,12 +980,38 @@
     cursor: grabbing;
   }
 
-  /* 量尺寸用的盒子：它的 clientWidth / clientHeight 就是可用区域 */
+  /* 外层：clientWidth/Height 就是「去掉留白的整块」 */
   .viewer__frame {
+    width: 100%;
+    height: 100%;
+  }
+
+  /* 内层：padding 在这一层，clientWidth/Height 就是「带留白的区域」 */
+  .viewer__inner {
     display: grid;
     width: 100%;
     height: 100%;
+    padding: 1rem 1rem 4.5rem;
     place-items: center;
+  }
+
+  /*
+    放大时把左右和上边的留白也吃掉，只留底部那截给工具条。
+
+    只把显示框的尺寸算成「整块」是不够的 —— 承载它的 `.viewer__inner` 还带着
+    padding，框比内容盒宽，居中时会被挤出一侧，观感就是「放大了但四周还留一圈背景」。
+    尺寸和容器要一起改，留白才算真的吃掉。
+  */
+  .viewer.is-zoomed .viewer__inner {
+    padding: 0 0 4.5rem 0;
+  }
+
+  /* 竖排：卡片在上，信息行在下 */
+  .viewer__stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
   }
 
   /* ---- 入场：缩放 + 轻微翻转。与鼠标倾斜分开，互不打架 --------------- */
@@ -745,11 +1084,17 @@
     }
   }
 
-  /* 尺寸由 JS 算好写在元素 style 上；这里的 100% 只是加载完成前的兜底 */
+  /*
+    图片的 width / height 由 JS 写成「适应尺寸」（fit），显示框的 width / height
+    也由 JS 写（放大时会从 fit 长到整块）。两者都不走 CSS 百分比 —— 百分比
+    max-height 在高度 auto 的祖先链里会失效，而这里的每一像素都要算得准。
+    `inset: 0; margin: auto` 把图片在显示框里居中；transform 以自身中心为原点缩放。
+  */
   .viewer__img {
+    position: absolute;
+    inset: 0;
+    margin: auto;
     display: block;
-    width: 100%;
-    height: 100%;
     object-fit: contain;
     opacity: 0;
     transition: opacity 0.28s ease-out;
@@ -815,19 +1160,21 @@
     opacity: 0.7;
   }
 
-  /* ---- 前景信息层 ---------------------------------------------------- */
+  /* ---- 信息行：在图片**下面**，不在图片上 ---------------------------- */
+  /*
+    之前它是卡片里的一层（translateZ(64px) + 底部黑色渐变），压在图上。
+    两个毛病：一是挡住画面，二是文字颜色跟着主题走 —— 浅色主题下就成了
+    深字压在深色渐变上，读不出来。挪到普通流里、用主题自己的前景色，
+    两个问题一起解决。
+  */
   .viewer__meta {
-    position: absolute;
-    right: -1px;
-    bottom: -1px;
-    left: -1px;
-    transform: translateZ(64px);
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 0.5rem;
-    padding: 0.4rem 0.6rem;
-    border-radius: 0 0 var(--radius-card) var(--radius-card);
-    background: linear-gradient(to top, rgb(0 0 0 / 0.72), transparent);
+    width: 100%;
+    /* 高度必须固定：`fit` 的可用高度里按这个常量扣掉了它 */
+    height: 1.875rem;
     pointer-events: none;
   }
 
@@ -836,19 +1183,43 @@
   .viewer__meta :global(.viewer-chip) {
     flex: none;
     border-radius: 0.25rem;
-    background: color-mix(in oklab, var(--tone-accent) 22%, transparent);
-    padding: 0.05rem 0.35rem;
+    background: color-mix(in oklab, var(--tone-accent) 20%, transparent);
+    padding: 0.1rem 0.4rem;
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
     color: var(--tone-accent);
+  }
+
+  /*
+    可点击的画师名。信息行整体是 `pointer-events: none`（免得挡住下面的图），
+    所以这一个要单独把事件收回来。
+  */
+  .viewer__meta :global(.viewer-artist) {
+    pointer-events: auto;
+    flex: none;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: 0.25rem;
+    padding: 0.1rem 0.4rem;
+    font-size: 11px;
+    color: var(--tone-accent);
+    transition:
+      background 0.15s,
+      border-color 0.15s;
+  }
+
+  .viewer__meta :global(.viewer-artist:hover) {
+    border-color: color-mix(in oklab, var(--tone-accent) 45%, transparent);
+    background: color-mix(in oklab, var(--tone-accent) 12%, transparent);
   }
 
   .viewer__meta :global(.viewer-caption) {
     min-width: 0;
-    flex: 1;
+    max-width: 60vw;
     overflow: hidden;
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 11px;
+    /* 主题的前景弱化色，浅色主题下是深色、深色主题下是浅色，两边都读得清 */
     color: var(--tone-fg-soft);
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -926,6 +1297,12 @@
     color: var(--tone-accent);
   }
 
+  /* 复制失败：按钮自己变红，别静默 —— 主人反馈过「点了没反应」最难查 */
+  .viewer__tool.is-failed {
+    background: color-mix(in oklab, #e11d48 22%, transparent);
+    color: #e11d48;
+  }
+
   .viewer__divider {
     width: 1px;
     height: 1rem;
@@ -970,6 +1347,22 @@
     font-size: 0.75rem;
     word-break: break-all;
     color: var(--tone-text-muted);
+  }
+
+  /* ---- 特效总开关：关掉后变成朴素平面显示 ---------------------------- */
+  .viewer.is-flat .viewer__halo,
+  .viewer.is-flat .viewer__glare,
+  .viewer.is-flat .viewer__sheen {
+    display: none;
+  }
+
+  .viewer.is-flat .viewer__scene,
+  .viewer.is-flat .viewer__shot {
+    animation: none;
+  }
+
+  .viewer.is-flat .viewer__card {
+    transform: none;
   }
 
   /* ---- 尊重系统的减少动效设置 ---------------------------------------- */

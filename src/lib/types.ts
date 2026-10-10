@@ -69,6 +69,13 @@ export interface Stats {
   totalBytes: number;
 }
 
+/**
+ * 画幅。与 Rust 侧 `db::models::Orientation` 一一对应（`#[serde(rename_all = "lowercase")]`）。
+ * 用字面量联合而不是 string：传错值时后端反序列化会直接失败，而不是悄悄
+ * 拼出一个永远匹配不到任何行的 SQL。
+ */
+export type Orientation = "landscape" | "portrait" | "square";
+
 export type SortBy = "filename" | "modifiedAt" | "indexedAt" | "fileSize" | "rating";
 
 export interface ImageQuery {
@@ -79,6 +86,11 @@ export interface ImageQuery {
   artistUids?: string[] | null;
   /** 按 Pixiv 官方标签筛选（多选，**同时包含**才算命中）。 */
   pixivTags?: string[] | null;
+  /**
+   * 按画幅筛选。宽高在扫描阶段就读过文件头存下来了，所以这个筛选零成本。
+   * 传 `null` / 不传表示不限。
+   */
+  orientation?: Orientation | null;
   search?: string | null;
   favoritesOnly?: boolean;
   minimumRating?: number | null;
@@ -203,11 +215,19 @@ export interface TagCount {
 
 /** 元数据覆盖情况。 */
 export interface MetaStats {
-  /** 成功取到的 PID 数 */
+  /** 成功取到元数据的 PID 数 */
   done: number;
-  /** 抓过但失败的（含作品已删除） */
+  /**
+   * **作品在 Pixiv 上没了**（404）—— 作者删除 / 转私密 / 下架。
+   *
+   * **跟本地文件无关**：下载到硬盘上的副本不受影响，实测过三个这样的 PID，
+   * 文件都在、修改时间还是当初下载时的。这只是 Pixiv 那一侧的终态，不再重抓。
+   * 转私密的作品以后可能放回来，所以留了「重查」出口。
+   */
+  missing: number;
+  /** 抓过但**可重试**的失败（网络 / 限流） */
   failed: number;
-  /** 还没抓过的 */
+  /** 还没抓过、或者失败后等着重试的 */
   pending: number;
 }
 
@@ -220,12 +240,26 @@ export interface MetaBatch {
   aborted: boolean;
   /** 中止的原因是**被限流**，而不是网络不通。界面上要提示「过一阵再来」。 */
   rateLimited: boolean;
+  /** 被用户叫停（不是出错） */
+  stopped: boolean;
+  /** 整轮自动补全：本轮已处理多少条 */
+  overallDone: number;
+  /** 整轮自动补全：本轮一共要处理多少条 */
+  overallTotal: number;
+  /** 整轮实际花了多少秒（单批调用时为 0） */
+  elapsedSecs: number;
 }
 
 /** 元数据抓取进度（`pixiv://meta-progress` 事件的负载）。 */
 export interface MetaProgress {
+  /** 本批已处理 */
   processed: number;
+  /** 本批总数 */
   total: number;
+  /** 整轮已处理（单批调用时为 0） */
+  overallDone: number;
+  /** 整轮总数（单批调用时为 0） */
+  overallTotal: number;
 }
 
 /**

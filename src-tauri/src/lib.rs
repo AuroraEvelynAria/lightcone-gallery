@@ -24,6 +24,9 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // 剪贴板插件：只用它的 Rust API（`app.clipboard().write_image`），
+        // 走的是进程内调用、不经过 IPC，所以不需要在 capabilities 里放行它的命令。
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             // AppHandle 是 clone 成本极低的句柄，先取出来避免与 app.manage 的可变借用冲突
             let handle = app.handle().clone();
@@ -109,6 +112,10 @@ pub fn run() {
             commands::list_pixiv_tags,
             commands::pixiv_meta_stats,
             commands::illust_detail,
+            commands::reset_missing_meta,
+            commands::fetch_all_meta,
+            commands::stop_meta_fetch,
+            commands::copy_image_to_clipboard,
         ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
