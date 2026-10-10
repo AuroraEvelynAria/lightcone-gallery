@@ -91,7 +91,7 @@
     <!-- 预览区 -->
     <div class="relative flex min-w-0 flex-1 items-center justify-center p-4">
       {#if previewFailed}
-        <p class="text-sm text-slate-400">无法预览该文件（源文件可能已被移动或删除）</p>
+        <p class="text-sm text-muted">无法预览该文件（源文件可能已被移动或删除）</p>
       {:else}
         <img
           src={convertFileSrc(image.path)}
@@ -123,8 +123,8 @@
     <div class="flex w-80 shrink-0 flex-col border-l border-surface-800 bg-surface-900">
       <div class="flex items-start justify-between gap-2 border-b border-surface-800 p-4">
         <div class="min-w-0">
-          <p class="truncate text-sm font-semibold text-slate-100" data-selectable>{image.filename}</p>
-          <p class="text-[11px] text-slate-500">{image.extension.toUpperCase()}</p>
+          <p class="truncate text-sm font-semibold text-fg" data-selectable>{image.filename}</p>
+          <p class="text-[11px] text-muted">{image.extension.toUpperCase()}</p>
         </div>
         <button type="button" class="icon-btn" aria-label="关闭" onclick={onclose}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
@@ -155,7 +155,7 @@
                 d="M21 8.25c0-2.485-2.099-4.5-4.688-4.5-1.935 0-3.597 1.126-4.312 2.733-.715-1.607-2.377-2.733-4.313-2.733C5.1 3.75 3 5.765 3 8.25c0 7.22 9 12 9 12s9-4.78 9-12z"
               />
             </svg>
-            <span class="text-slate-300">{image.isFavorite ? "已收藏" : "收藏"}</span>
+            <span class="text-soft">{image.isFavorite ? "已收藏" : "收藏"}</span>
           </button>
 
           <div class="flex items-center gap-0.5">
@@ -173,7 +173,7 @@
                   stroke="currentColor"
                   stroke-width="1.5"
                   class:text-amber-400={star <= image.rating}
-                  class:text-slate-600={star > image.rating}
+                  class:text-mark={star > image.rating}
                 >
                   <path
                     stroke-linecap="round"
@@ -196,12 +196,12 @@
                 <button type="button" class="cursor-pointer opacity-60 hover:opacity-100" onclick={() => detachTag(tag.id)}>×</button>
               </span>
             {:else}
-              <span class="text-xs text-slate-500">未添加标签</span>
+              <span class="text-xs text-muted">未添加标签</span>
             {/each}
           </div>
           {#if availableTags.length > 0}
             <select
-              class="mt-2 w-full cursor-pointer rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-slate-300 outline-none focus:border-accent-500"
+              class="mt-2 w-full cursor-pointer rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none focus:border-accent-500"
               onchange={(event) => {
                 const value = Number((event.currentTarget as HTMLSelectElement).value);
                 (event.currentTarget as HTMLSelectElement).value = "";
@@ -223,12 +223,12 @@
             {#each detail?.albums ?? [] as album (album.id)}
               <span class="tag-chip">{album.name}</span>
             {:else}
-              <span class="text-xs text-slate-500">未加入相册</span>
+              <span class="text-xs text-muted">未加入相册</span>
             {/each}
           </div>
           {#if gallery.albums.length > 0}
             <select
-              class="mt-2 w-full cursor-pointer rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-slate-300 outline-none focus:border-accent-500"
+              class="mt-2 w-full cursor-pointer rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none focus:border-accent-500"
               onchange={(event) => {
                 const value = Number((event.currentTarget as HTMLSelectElement).value);
                 (event.currentTarget as HTMLSelectElement).value = "";
@@ -248,23 +248,23 @@
           <h3 class="panel-head">文件信息</h3>
           <dl class="space-y-1.5 text-xs">
             <div class="flex justify-between gap-3">
-              <dt class="text-slate-500">尺寸</dt>
-              <dd class="text-right text-slate-300">{formatDimensions(image.width, image.height)}</dd>
+              <dt class="text-muted">尺寸</dt>
+              <dd class="text-right text-soft">{formatDimensions(image.width, image.height)}</dd>
             </div>
             <div class="flex justify-between gap-3">
-              <dt class="text-slate-500">大小</dt>
-              <dd class="text-right text-slate-300">{formatBytes(image.fileSize)}</dd>
+              <dt class="text-muted">大小</dt>
+              <dd class="text-right text-soft">{formatBytes(image.fileSize)}</dd>
             </div>
             <div class="flex justify-between gap-3">
-              <dt class="text-slate-500">修改时间</dt>
-              <dd class="text-right text-slate-300">{formatDate(image.modifiedAt)}</dd>
+              <dt class="text-muted">修改时间</dt>
+              <dd class="text-right text-soft">{formatDate(image.modifiedAt)}</dd>
             </div>
             <div class="flex justify-between gap-3">
-              <dt class="text-slate-500">加入时间</dt>
-              <dd class="text-right text-slate-300">{formatDate(image.indexedAt)}</dd>
+              <dt class="text-muted">加入时间</dt>
+              <dd class="text-right text-soft">{formatDate(image.indexedAt)}</dd>
             </div>
           </dl>
-          <p class="mt-2 rounded-md bg-surface-850 p-2 text-[11px] break-all text-slate-500" data-selectable>
+          <p class="mt-2 rounded-md bg-surface-850 p-2 text-[11px] break-all text-muted" data-selectable>
             {image.path}
           </p>
         </section>
@@ -281,13 +281,13 @@
            transition hover:bg-black/70 hover:text-white;
   }
   .panel-head {
-    @apply mb-2 text-[11px] font-semibold tracking-wide text-slate-500 uppercase;
+    @apply mb-2 text-[11px] font-semibold tracking-wide text-muted uppercase;
   }
   .tag-chip {
     @apply inline-flex items-center gap-1 rounded-full border border-surface-700 px-2 py-0.5
-           text-xs text-slate-300;
+           text-xs text-soft;
   }
   .icon-btn {
-    @apply shrink-0 cursor-pointer rounded p-1 text-slate-500 transition hover:bg-surface-800 hover:text-slate-200;
+    @apply shrink-0 cursor-pointer rounded p-1 text-muted transition hover:bg-surface-800 hover:text-fg;
   }
 </style>

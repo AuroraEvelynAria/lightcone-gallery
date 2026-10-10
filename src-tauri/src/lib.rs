@@ -88,6 +88,10 @@ pub fn run() {
             commands::library_stats,
             commands::thumbnail_cache_usage,
             commands::clear_thumbnail_cache,
+            // 阶段三：外观（窗口材质 + 键值设置）
+            commands::set_window_material,
+            commands::load_settings,
+            commands::save_settings,
             // 阶段一：作品（Pixiv）维度
             commands::scan_artworks_folder,
             commands::list_artworks,

@@ -68,7 +68,7 @@
     {:else if gallery.notice}
       <div
         class="pointer-events-auto rounded-lg border border-surface-700 bg-surface-850/95 px-4 py-2.5
-               text-sm text-slate-200 shadow-xl backdrop-blur"
+               text-sm text-fg shadow-xl backdrop-blur"
       >
         {gallery.notice}
       </div>

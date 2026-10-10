@@ -33,7 +33,7 @@
            p-2 pt-8 text-left opacity-0 transition group-hover:opacity-100"
   >
     <p class="truncate text-xs font-medium text-white">{image.filename}</p>
-    <p class="truncate text-[10px] text-slate-300">
+    <p class="truncate text-[10px] text-soft">
       {formatBytes(image.fileSize)}
       {#if image.width && image.height}
         · {image.width}×{image.height}

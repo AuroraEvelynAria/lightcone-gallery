@@ -48,8 +48,8 @@
       </svg>
     </div>
     <div class="min-w-0">
-      <p class="truncate text-sm font-semibold text-slate-100">LightCone Gallery</p>
-      <p class="truncate text-[11px] text-slate-500">
+      <p class="truncate text-sm font-semibold text-fg">LightCone Gallery</p>
+      <p class="truncate text-[11px] text-muted">
         {gallery.stats ? `${gallery.stats.images} 张图片` : "本地图库"}
       </p>
     </div>
@@ -80,6 +80,12 @@
       <!-- 阶段一新增：作品（PID）维度页面 -->
       <a href="/artworks" class="sidebar-item">
         <span>作品库 (PID)</span>
+        <span class="count">↗</span>
+      </a>
+
+      <!-- 阶段三新增：外观（配色 / 材质 / 明暗） -->
+      <a href="/appearance" class="sidebar-item">
+        <span>外观</span>
         <span class="count">↗</span>
       </a>
     </div>
@@ -119,7 +125,7 @@
           </button>
         </div>
       {:else}
-        <p class="px-2.5 py-1 text-xs text-slate-500">还没有图库</p>
+        <p class="px-2.5 py-1 text-xs text-muted">还没有图库</p>
       {/each}
     </div>
 
@@ -165,7 +171,7 @@
         </button>
       {:else}
         {#if creating !== "album"}
-          <p class="px-2.5 py-1 text-xs text-slate-500">还没有相册</p>
+          <p class="px-2.5 py-1 text-xs text-muted">还没有相册</p>
         {/if}
       {/each}
     </div>
@@ -209,7 +215,7 @@
               id: tag.id,
             })
               ? 'border-accent-500 bg-accent-500/15 text-accent-400'
-              : 'border-surface-700 text-slate-400 hover:border-surface-600'}"
+              : 'border-surface-700 text-muted hover:border-surface-600'}"
             onclick={() => gallery.select({ kind: "tag", id: tag.id })}
           >
             {tag.name}
@@ -217,7 +223,7 @@
           </button>
         {:else}
           {#if creating !== "tag"}
-            <p class="text-xs text-slate-500">还没有标签</p>
+            <p class="text-xs text-muted">还没有标签</p>
           {/if}
         {/each}
       </div>
@@ -225,7 +231,7 @@
   </nav>
 
   <footer class="border-t border-surface-800 px-3 py-2.5">
-    <div class="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+    <div class="flex items-center justify-between gap-2 text-[11px] text-muted">
       <span class="truncate">
         缩略图缓存
         {#if gallery.cacheUsage}
@@ -236,7 +242,7 @@
       </span>
       <button
         type="button"
-        class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 transition hover:bg-surface-800 hover:text-slate-200"
+        class="shrink-0 cursor-pointer rounded px-1.5 py-0.5 transition hover:bg-surface-800 hover:text-fg"
         title="删除磁盘上的缩略图缓存，浏览时会按需重建"
         onclick={() => gallery.clearThumbnailCache()}
       >
@@ -253,23 +259,23 @@
   /* 侧栏内部复用的几个组合类，写成 @apply 避免在模板里堆一长串工具类 */
   .sidebar-item {
     @apply flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5
-           text-left text-sm text-slate-400 transition hover:bg-surface-850 hover:text-slate-200;
+           text-left text-sm text-muted transition hover:bg-surface-850 hover:text-fg;
   }
   .sidebar-item-active {
     @apply bg-accent-500/15 text-accent-400 hover:bg-accent-500/20 hover:text-accent-400;
   }
   .count {
-    @apply shrink-0 text-[11px] tabular-nums text-slate-500;
+    @apply shrink-0 text-[11px] tabular-nums text-muted;
   }
   .section-head {
     @apply flex items-center justify-between px-2.5 pb-1 text-[11px] font-semibold
-           tracking-wide text-slate-500 uppercase;
+           tracking-wide text-muted uppercase;
   }
   .icon-btn {
-    @apply cursor-pointer rounded p-1 text-slate-500 transition hover:bg-surface-800 hover:text-slate-200;
+    @apply cursor-pointer rounded p-1 text-muted transition hover:bg-surface-800 hover:text-fg;
   }
   .draft-input {
     @apply w-full rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-sm
-           text-slate-200 outline-none focus:border-accent-500;
+           text-fg outline-none focus:border-accent-500;
   }
 </style>

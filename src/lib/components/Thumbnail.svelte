@@ -89,7 +89,7 @@
       onerror={() => (failed = true)}
     />
   {:else if failed}
-    <div class="flex h-full w-full items-center justify-center bg-surface-850 text-slate-600">
+    <div class="flex h-full w-full items-center justify-center bg-surface-850 text-mark">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-8">
         <path
           stroke-linecap="round"

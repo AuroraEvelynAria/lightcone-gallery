@@ -78,6 +78,22 @@ export const api = {
   thumbnailCacheUsage: () => invoke<CacheUsage>("thumbnail_cache_usage"),
   clearThumbnailCache: () => invoke<void>("clear_thumbnail_cache"),
 
+  // ---- 外观（阶段三）------------------------------------------------------
+  /**
+   * 应用窗口材质。`material` 取 `solid` / `mica` / `acrylic` / `tabbed` / `blur`，
+   * `dark` 用来选材质的明暗变体（只有 Mica / Tabbed 提供）。
+   *
+   * 注意：底层 `window_vibrancy` 的错误被 Tauri 丢掉了，所以不支持的平台上
+   * 这个调用会「成功」但什么也没发生 —— 平台要求由前端标注，不假装能检测。
+   */
+  setWindowMaterial: (material: string, dark: boolean) =>
+    invoke<void>("set_window_material", { material, dark }),
+  /** 读取全部键值设置。数据库是外观偏好的权威来源，localStorage 只作首帧缓存。 */
+  loadSettings: () => invoke<Record<string, string>>("load_settings"),
+  /** 写入若干键值设置（同名的键直接覆盖）。 */
+  saveSettings: (entries: Record<string, string>) =>
+    invoke<void>("save_settings", { entries }),
+
   // ---- 作品（阶段一：Pixiv 维度）------------------------------------------
   /** 扫描一个本地文件夹，解析 `{pid}_p{num}` 入库，并为缺缩略图的作品生成 WebP */
   scanArtworksFolder: (path: string) =>

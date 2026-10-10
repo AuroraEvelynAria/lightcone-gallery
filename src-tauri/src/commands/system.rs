@@ -1,10 +1,13 @@
-//! 全局统计与缓存维护命令。
+//! 全局统计、缓存维护、窗口材质与键值设置命令。
 
+use std::collections::HashMap;
+
+use rusqlite::params;
 use serde::Serialize;
 use tauri::State;
 
 use crate::db::models::Stats;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::state::{AppState, with_db};
 use crate::thumbnails;
 
@@ -50,5 +53,81 @@ pub async fn clear_thumbnail_cache(state: State<'_, AppState>) -> AppResult<()> 
 
     tauri::async_runtime::spawn_blocking(move || thumbnails::clear_cache(&cache_dir))
         .await
-        .map_err(|err| crate::error::AppError::Other(format!("清理缓存失败: {err}")))?
+        .map_err(|err| AppError::Other(format!("清理缓存失败: {err}")))?
+}
+
+/// 应用窗口材质（云母 / 亚克力 / 标签页 / 模糊），`solid` 表示撤掉材质回到纯色。
+///
+/// `dark` 用来选材质的明暗变体：只有 Mica / Tabbed 提供了显式的明暗变体，
+/// 若只传 `Effect::Mica` 它会跟随**系统**偏好，跟应用自己的明暗设置对不上。
+///
+/// **平台限制**：Mica / Tabbed 需要 Windows 11（build ≥ 22000），Acrylic 需要
+/// Windows 10 v1809+，Blur 在 Windows 11 22621 上拖动窗口会明显卡顿。
+///
+/// **注意**：Tauri 的 `apply_effects` 把底层 `window_vibrancy` 的错误整个丢掉了
+/// （见 `tauri/src/vibrancy/windows.rs`），所以本命令**无法**告知材质是否真的生效——
+/// 在不支持的系统上它会静默无操作。前端的做法是在选项旁标注平台要求，不假装能检测。
+#[tauri::command]
+pub async fn set_window_material(
+    window: tauri::WebviewWindow,
+    material: String,
+    dark: bool,
+) -> AppResult<()> {
+    use tauri::window::{Effect, EffectsBuilder};
+
+    let effect = match material.as_str() {
+        "solid" => None,
+        "mica" => Some(if dark { Effect::MicaDark } else { Effect::MicaLight }),
+        "acrylic" => Some(Effect::Acrylic),
+        "tabbed" => Some(if dark {
+            Effect::TabbedDark
+        } else {
+            Effect::TabbedLight
+        }),
+        "blur" => Some(Effect::Blur),
+        other => {
+            return Err(AppError::InvalidInput(format!("未知的窗口材质: {other}")));
+        }
+    };
+
+    window
+        .set_effects(effect.map(|effect| EffectsBuilder::new().effect(effect).build()))
+        .map_err(|err| AppError::Other(format!("应用窗口材质失败: {err}")))
+}
+
+/// 读取全部键值设置。
+///
+/// 主题偏好这类「界面状态」放数据库而不是 WebView 的 localStorage —— 后者会被
+/// 清缓存顺手清掉，用户的外观设置不该跟着一起消失。
+#[tauri::command]
+pub async fn load_settings(state: State<'_, AppState>) -> AppResult<HashMap<String, String>> {
+    with_db(&state, |conn| {
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
+    })
+    .await
+}
+
+/// 写入若干键值设置（同名的键直接覆盖）。
+#[tauri::command]
+pub async fn save_settings(
+    state: State<'_, AppState>,
+    entries: HashMap<String, String>,
+) -> AppResult<()> {
+    with_db(&state, move |conn| {
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )?;
+            for (key, value) in &entries {
+                stmt.execute(params![key, value])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    })
+    .await
 }

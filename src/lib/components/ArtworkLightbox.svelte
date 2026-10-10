@@ -40,11 +40,11 @@
     onclick={onclose}
   ></button>
 
-  <header class="relative z-10 flex items-center gap-3 px-5 py-3 text-slate-200">
+  <header class="relative z-10 flex items-center gap-3 px-5 py-3 text-fg">
     <span class="font-mono text-sm font-semibold text-accent-400" title="Pixiv 作品号">
       {artwork.pid}
     </span>
-    <span class="text-xs text-slate-400">p{artwork.page}</span>
+    <span class="text-xs text-muted">p{artwork.page}</span>
     <div class="flex-1"></div>
     <button
       type="button"
@@ -80,7 +80,7 @@
     {/if}
   </div>
 
-  <footer class="relative z-10 px-5 pb-4 text-center font-mono text-[11px] break-all text-slate-500">
+  <footer class="relative z-10 px-5 pb-4 text-center font-mono text-[11px] break-all text-muted">
     {artwork.originalPath}
   </footer>
 </div>

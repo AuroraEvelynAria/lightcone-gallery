@@ -1,33 +1,110 @@
 @import "tailwindcss";
 
-/* Tailwind v4 设计令牌：这里定义的颜色 / 字体会自动生成对应工具类 */
+/* ===========================================================================
+   令牌层
+
+   配色的单一来源是 `src/lib/themes.ts`（取自 RhinE 的 tokens/tokens.json），
+   由 `theme.svelte.ts` 在运行时把 15 个语义令牌写成 `--tone-*`。
+   下面 `:root` 里的值只是兜底：万一 JS 没跑到，界面也得是能看的。
+
+   三条约定：
+
+   1. `--color-*` 全部指向 `var(--tone-*)`。换配色只要改 `--tone-*`，
+      Tailwind 生成的所有工具类会跟着变，组件一行都不用动。
+   2. 带材质的方案下，底色与面板按 `--alpha-*` 让出透明度。系统材质画在窗口
+      最底层，WebView 的底色不透明就会把它完全盖住 —— 等于没开。
+   3. 前景层次按「强调度」而不是「明度」编号：`text-fg` 最强、`text-mark` 最弱。
+      浅色方案里 fg 是深色、深色方案里 fg 是浅色，组件不必关心自己在哪种模式下。
+   =========================================================================== */
+
+:root {
+  /* 兜底值 = ARCHIVE 深色 */
+  --tone-bg: #0b0b0b;
+  --tone-fg: #f2f0ea;
+  --tone-fg-soft: #bbb9b4;
+  --tone-text-muted: #8c8b88;
+  --tone-mark: #8a8984;
+  --tone-line-dim: #73726f;
+  --tone-line-faint: #393938;
+  --tone-hair: #30302f;
+  --tone-panel: #111110;
+  --tone-panel-hi: #181817;
+  --tone-case: #1b1b1a;
+  --tone-case-hi: #2b2b29;
+  --tone-well: #121212;
+  --tone-accent: #ff7a01;
+  --tone-on-accent: #0b0b0b;
+
+  --alpha-bg: 1;
+  --alpha-panel: 1;
+  --alpha-case: 1;
+}
+
 @theme {
   --font-sans:
     "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  /* RhinE 用的是 Geist Mono；没随包分发字体文件，先用系统等宽栈顶上 */
+  --font-mono:
+    ui-monospace, "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
 
-  --color-surface-950: oklch(0.17 0.012 265);
-  --color-surface-900: oklch(0.21 0.014 265);
-  --color-surface-850: oklch(0.24 0.015 265);
-  --color-surface-800: oklch(0.28 0.016 265);
-  --color-surface-700: oklch(0.35 0.018 265);
-  --color-surface-600: oklch(0.45 0.02 265);
+  /* 前景：从最强到最弱 */
+  --color-fg: var(--tone-fg);
+  --color-soft: var(--tone-fg-soft);
+  --color-muted: var(--tone-text-muted);
+  --color-mark: var(--tone-mark);
 
-  --color-accent-400: oklch(0.79 0.15 212);
-  --color-accent-500: oklch(0.71 0.16 212);
-  --color-accent-600: oklch(0.62 0.16 212);
+  /* 描边：hair 是发丝线，line-strong 是最重的分隔 */
+  --color-hair: var(--tone-hair);
+  --color-line: var(--tone-line-faint);
+  --color-line-strong: var(--tone-line-dim);
+
+  /* 内凹区域（输入框、凹槽） */
+  --color-well: var(--tone-well);
+
+  /* 面板层。名字沿用项目原有的 surface 阶梯，值改由配色与材质决定 */
+  --color-surface-950: color-mix(
+    in oklab,
+    var(--tone-bg) calc(var(--alpha-bg) * 100%),
+    transparent
+  );
+  --color-surface-900: color-mix(
+    in oklab,
+    var(--tone-panel) calc(var(--alpha-panel) * 100%),
+    transparent
+  );
+  --color-surface-850: color-mix(
+    in oklab,
+    var(--tone-case) calc(var(--alpha-case) * 100%),
+    transparent
+  );
+  --color-surface-800: var(--tone-hair);
+  --color-surface-700: var(--tone-line-faint);
+  --color-surface-600: var(--tone-line-dim);
+  --color-panel-hi: var(--tone-panel-hi);
+
+  /* 强调色：500 是本色，400 更靠近前景（做文字更醒目），
+     600 更靠近底色（做实心底更稳）。实心底上的文字一律用 on-accent。 */
+  --color-accent-400: color-mix(in oklab, var(--tone-accent) 82%, var(--tone-fg));
+  --color-accent-500: var(--tone-accent);
+  --color-accent-600: color-mix(in oklab, var(--tone-accent) 86%, var(--tone-bg));
+  --color-on-accent: var(--tone-on-accent);
 
   --radius-card: 0.75rem;
 }
 
 @layer base {
-  html,
-  body {
+  /* 窗口是 transparent 的：html 必须真的透明，材质才能从底下透上来 */
+  html {
     height: 100%;
     margin: 0;
+    background: transparent;
   }
 
   body {
-    @apply bg-surface-950 text-slate-200 font-sans;
+    height: 100%;
+    margin: 0;
+    /* surface-950 在材质生效时本身就是半透明的，所以铺在 body 上不会挡住材质 */
+    @apply bg-surface-950 text-fg font-sans;
     /* 桌面应用观感：禁止橡皮筋滚动与整页拖动选中 */
     overscroll-behavior: none;
     user-select: none;
@@ -39,7 +116,7 @@
     user-select: text;
   }
 
-  /* 细滚动条，避免默认滚动条破坏深色配色 */
+  /* 细滚动条，跟着配色走 */
   ::-webkit-scrollbar {
     width: 10px;
     height: 10px;

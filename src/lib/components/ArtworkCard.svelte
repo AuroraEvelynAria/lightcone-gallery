@@ -36,10 +36,10 @@
       <span class="font-mono text-xs font-semibold text-accent-400" title="Pixiv 作品号">
         {artwork.pid}
       </span>
-      <span class="shrink-0 text-[10px] tabular-nums text-slate-300">p{artwork.page}</span>
+      <span class="shrink-0 text-[10px] tabular-nums text-soft">p{artwork.page}</span>
     </div>
     <p
-      class="truncate font-mono text-[10px] text-slate-400 opacity-0 transition group-hover:opacity-100"
+      class="truncate font-mono text-[10px] text-muted opacity-0 transition group-hover:opacity-100"
     >
       {artwork.originalPath}
     </p>
