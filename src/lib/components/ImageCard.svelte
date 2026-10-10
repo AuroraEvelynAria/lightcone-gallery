@@ -25,7 +25,7 @@
     aria-label={`查看 ${image.filename}`}
     onclick={() => onselect(image)}
   >
-    <Thumbnail owner="image" id={image.id} size={320} alt={image.filename} />
+    <Thumbnail id={image.id} size={320} alt={image.filename} />
   </button>
 
   <div

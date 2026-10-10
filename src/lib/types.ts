@@ -119,7 +119,13 @@ export interface CacheUsage {
 export interface Artwork {
   id: number;
   pid: string;
-  filePath: string;
+  /** 原图绝对路径。只在点击卡片弹窗时使用，列表本身不加载它。 */
+  originalPath: string;
+  /**
+   * 缩略图绝对路径。扫描阶段就生成好了，列表直接带着走，卡片不必再问后端。
+   * 为 `null` 表示生成失败或缓存被清掉，卡片会走一次重生成回退。
+   */
+  thumbnailPath: string | null;
   /** 文件名里的 `_p{num}` */
   page: number;
   createdAt: number;
@@ -143,4 +149,16 @@ export interface ArtworkScanSummary {
   duplicates: number;
   /** 命名不符合规范、未收进作品库的数量 */
   skipped: number;
+  /** 本次真正生成 / 重算了缩略图的张数 */
+  thumbnailsGenerated: number;
+  /** 缩略图缓存仍然新鲜、直接跳过的张数 */
+  thumbnailsSkipped: number;
+  /** 缩略图生成失败的张数（源文件缺失或解码失败） */
+  thumbnailsFailed: number;
+}
+
+/** 缩略图批量生成的进度（`artworks://thumbnail-progress` 事件的负载）。 */
+export interface ThumbnailProgress {
+  processed: number;
+  total: number;
 }

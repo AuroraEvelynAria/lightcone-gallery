@@ -12,12 +12,21 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{AppError, AppResult};
 
 /// 允许请求的缩略图边长白名单，避免任意 size 撑爆缓存目录。
-pub const ALLOWED_SIZES: &[u32] = &[160, 320, 640];
+pub const ALLOWED_SIZES: &[u32] = &[160, 320, 400, 640];
 pub const DEFAULT_SIZE: u32 = 320;
+
+/// 作品库缩略图的目标边长。Pixiv 作品以插画为主，400 在常见格子尺寸下
+/// 即使按 1.5~2 倍屏缩放也不会糊。
+pub const ARTWORK_SIZE: u32 = 400;
+
+/// 渲染线程数上限。再往上收益递减，而且会把 CPU 从 UI 那边抢走。
+const MAX_RENDER_THREADS: usize = 8;
 
 /// 有损 WebP 质量。缩略图尺度上 80 已看不出差别；实测同一张照片，
 /// WebP q80 约为 JPEG q82 的 80% 体积。
@@ -106,6 +115,74 @@ pub async fn ensure_offloaded(
     })
     .await
     .map_err(|err| AppError::Other(format!("缩略图任务执行失败: {err}")))?
+}
+
+/// 缓存是否可直接用：文件存在，且不早于原图。
+///
+/// 扫描阶段的批量生成靠它跳过已经算过的，这样重复扫同一目录几乎不花时间。
+pub fn is_cached(cache_dir: &Path, owner: Owner, id: i64, source: &Path, size: u32) -> bool {
+    is_fresh(
+        &thumbnail_path(cache_dir, owner, id, normalize_size(size)),
+        source,
+    )
+}
+
+/// 并行生成一批缩略图，返回成功落盘的 `(id, 缩略图路径)`。
+///
+/// 解码 / 缩放 / 编码全在 CPU 上，实测单张约 23ms：串行跑一万张要近四分钟，
+/// 所以摊到多个线程（libwebp 对互不相关的图像编解码是线程安全的）。
+///
+/// SQLite 写入**刻意不在这里做** —— 调用方拿到结果后自己串行落库，
+/// 免得把连接和锁带进线程池。
+///
+/// `on_progress` 每完成一张调一次，节流与上报由调用方负责。
+pub fn ensure_parallel(
+    cache_dir: &Path,
+    owner: Owner,
+    jobs: &[(i64, PathBuf)],
+    size: u32,
+    on_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Vec<(i64, PathBuf)> {
+    let total = jobs.len();
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let size = normalize_size(size);
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_RENDER_THREADS)
+        .min(total);
+
+    let cursor = AtomicUsize::new(0);
+    let finished = AtomicUsize::new(0);
+    let rendered = Mutex::new(Vec::with_capacity(total));
+
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    // 原子游标领活：谁抢到算谁的，天然负载均衡
+                    let index = cursor.fetch_add(1, Ordering::Relaxed);
+                    if index >= total {
+                        break;
+                    }
+
+                    let (id, source) = &jobs[index];
+                    if let Ok(path) = ensure_thumbnail(cache_dir, owner, *id, source, size) {
+                        rendered.lock().unwrap().push((*id, path));
+                    }
+
+                    // fetch_add 的返回值唯一，所以每个完成数只会被一个线程看到
+                    let done = finished.fetch_add(1, Ordering::Relaxed) + 1;
+                    on_progress(done, total);
+                }
+            });
+        }
+    });
+
+    rendered.into_inner().unwrap()
 }
 
 /// 解码 -> 等比缩放 -> 有损 WebP 编码，返回文件字节。

@@ -3,12 +3,14 @@
 //! 迁移策略：读取 `PRAGMA user_version`，按版本号顺序执行增量脚本。
 //! 新增变更时**追加**一个新的 `if version < N` 分支，不要修改历史分支。
 
-use rusqlite::Connection;
+use std::path::Path;
+
+use rusqlite::{Connection, params};
 
 use crate::error::AppResult;
 
 /// 当前 schema 版本，与下面最后一个迁移分支保持一致。
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// v1：图库、图片、相册、标签、缩略图缓存与键值设置。
 const MIGRATION_V1: &str = r#"
@@ -117,6 +119,25 @@ CREATE UNIQUE INDEX idx_artworks_pid_page ON artworks(pid, page);
 CREATE INDEX idx_artworks_pid ON artworks(pid);
 "#;
 
+/// v3（阶段二）：缩略图路径入库 + 命名对齐 + 扫描根目录落盘。
+///
+/// 三处改动各自的理由：
+/// 1. `file_path` 改名 `original_path`。查询命令对外返回的是
+///    `pid / original_path / thumbnail_path`，列名跟着走，免得每层都要翻译一次。
+/// 2. 新增 `thumbnail_path`。缩略图在扫描阶段就生成好，前端拿列表直接就能渲染，
+///    不必每张卡片再问一次后端要路径。
+/// 3. `artwork_roots` 记录扫描过的根目录。原图要经 `asset://` 显示，而该协议的作用域
+///    **只存在于内存中**（见 lib.rs 的启动流程），不落盘就没法在重启后重新授权。
+const MIGRATION_V3: &str = r#"
+ALTER TABLE artworks RENAME COLUMN file_path TO original_path;
+ALTER TABLE artworks ADD COLUMN thumbnail_path TEXT;
+
+CREATE TABLE artwork_roots (
+    path       TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL
+);
+"#;
+
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -126,11 +147,58 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
     if version < 2 {
         conn.execute_batch(MIGRATION_V2)?;
     }
+    if version < 3 {
+        conn.execute_batch(MIGRATION_V3)?;
+    }
 
-    // 后续迁移在此追加： if version < 3 { conn.execute_batch(MIGRATION_V3)?; }
+    // 后续迁移在此追加： if version < 4 { conn.execute_batch(MIGRATION_V4)?; }
 
     if version != SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
+
+    // v3 之前入库的作品行从没登记过扫描根目录。这里反推补一次，同时覆盖两条路径：
+    // 「从老库升级上来」以及「库已经停在 v3、但 v3 迁移早于这段逻辑上线」。
+    // 登记过就只花一次 COUNT 查询，直接跳过。
+    let registered: i64 = conn.query_row("SELECT COUNT(*) FROM artwork_roots", [], |row| row.get(0))?;
+    if registered == 0 {
+        backfill_artwork_roots(conn)?;
+    }
+
+    Ok(())
+}
+
+/// 从现有 `original_path` 反推作品所在的目录，补登进 `artwork_roots`。
+///
+/// 不做这一步的话，老库里的作品原图不在 `asset://` 的授权范围内（该作用域只存在于
+/// 内存中，靠 `artwork_roots` 在每次启动时重建），点开检视弹窗会加载失败，
+/// 而用户完全不知道为什么。同一目录只登记一次；库里没有作品行时直接空跑。
+fn backfill_artwork_roots(conn: &Connection) -> AppResult<()> {
+    let mut dirs: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT original_path FROM artworks")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.filter_map(Result::ok)
+            .filter_map(|path| {
+                Path::new(&path)
+                    .parent()
+                    .map(|dir| dir.to_string_lossy().into_owned())
+            })
+            .collect()
+    };
+
+    if dirs.is_empty() {
+        return Ok(());
+    }
+    dirs.sort_unstable();
+    dirs.dedup();
+
+    let now = super::now_unix();
+    let mut stmt = conn.prepare(
+        "INSERT INTO artwork_roots (path, created_at) VALUES (?1, ?2)
+         ON CONFLICT(path) DO NOTHING",
+    )?;
+    for dir in &dirs {
+        stmt.execute(params![dir, now])?;
     }
 
     Ok(())
@@ -161,6 +229,7 @@ mod tests {
             "thumbnails",
             "settings",
             "artworks",
+            "artwork_roots",
         ] {
             let found: i64 = conn
                 .query_row(
@@ -199,7 +268,7 @@ mod tests {
         assert_eq!(remaining, 0, "级联删除未生效");
     }
 
-    /// v1 老库升级到 v2 必须保留原有数据（用户现网就是这个路径）。
+    /// v1 老库一路升到当前版本，必须保留原有数据。
     #[test]
     fn upgrades_existing_v1_database_without_data_loss() {
         let conn = Connection::open_in_memory().unwrap();
@@ -230,7 +299,6 @@ mod tests {
         let after: i32 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(after, 2);
         assert_eq!(after, SCHEMA_VERSION);
 
         let images: i64 = conn
@@ -253,6 +321,61 @@ mod tests {
         assert_eq!(artworks, 1, "v2 应新增 artworks 表");
     }
 
+    /// v2 -> v3：老库里的作品记录必须原样保留，旧列改名要跟过去、新列要补上。
+    /// 用户现网就是这条路径（v2 库里已有作品记录）。
+    #[test]
+    fn upgrades_existing_v2_database_and_keeps_artworks() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute_batch(MIGRATION_V2).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute(
+            "INSERT INTO artworks (pid, file_path, page, created_at)
+             VALUES ('123456', 'C:/a/123456_p0.jpg', 0, 7)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let (pid, original, thumb): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT pid, original_path, thumbnail_path FROM artworks",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(pid, "123456");
+        assert_eq!(original, "C:/a/123456_p0.jpg", "改名不得丢数据");
+        assert_eq!(thumb, None, "新列应为空，等扫描阶段回填");
+
+        let roots: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'artwork_roots'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(roots, 1, "v3 应新增 artwork_roots 表");
+
+        // 老库里的作品从没登记过扫描根目录，迁移必须从 original_path 反推补上，
+        // 否则重启后这些原图不在 asset:// 授权范围内，弹窗会加载失败
+        let backfilled: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT path FROM artwork_roots").unwrap();
+            let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(backfilled, vec!["C:/a".to_string()], "应从原图路径反推出所在目录");
+
+        // 幂等：再跑一次迁移不得重复登记
+        migrate(&conn).unwrap();
+        let again: i64 = conn
+            .query_row("SELECT COUNT(*) FROM artwork_roots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(again, 1);
+    }
+
     /// 回归：唯一约束必须是 (pid, page) 而不是 pid，
     /// 否则多页作品从第 2 页起会被 INSERT OR IGNORE 静默丢弃。
     #[test]
@@ -262,7 +385,7 @@ mod tests {
 
         let insert = |pid: &str, page: i64, path: &str| {
             conn.execute(
-                "INSERT INTO artworks (pid, file_path, page, created_at)
+                "INSERT INTO artworks (pid, original_path, page, created_at)
                  VALUES (?1, ?2, ?3, 0)
                  ON CONFLICT(pid, page) DO NOTHING",
                 rusqlite::params![pid, path, page],

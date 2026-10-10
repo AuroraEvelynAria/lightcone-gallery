@@ -22,12 +22,16 @@ import type {
   SortBy,
   Stats,
   Tag,
+  ThumbnailProgress,
 } from "./types";
 
 /** 扫描进度事件的频道名，与 Rust 端 `SCAN_PROGRESS_EVENT` 保持一致。 */
 export const SCAN_PROGRESS_EVENT = "scan://progress";
 
-export type { ScanProgress };
+/** 作品缩略图生成进度事件的频道名，与 Rust 端 `THUMBNAIL_PROGRESS_EVENT` 保持一致。 */
+export const THUMBNAIL_PROGRESS_EVENT = "artworks://thumbnail-progress";
+
+export type { ScanProgress, ThumbnailProgress };
 
 export const api = {
   // ---- 图库 ---------------------------------------------------------------
@@ -75,15 +79,23 @@ export const api = {
   clearThumbnailCache: () => invoke<void>("clear_thumbnail_cache"),
 
   // ---- 作品（阶段一：Pixiv 维度）------------------------------------------
-  /** 扫描一个本地文件夹，解析 `{pid}_p{num}` 后写入 artworks 表 */
+  /** 扫描一个本地文件夹，解析 `{pid}_p{num}` 入库，并为缺缩略图的作品生成 WebP */
   scanArtworksFolder: (path: string) =>
     invoke<ArtworkScanSummary>("scan_artworks_folder", { path }),
-  /** 分页读取作品列表：从第 offset 条开始返回 limit 条 */
+  /**
+   * 分页读取作品列表：从第 offset 条开始返回 limit 条。
+   *
+   * 每条都带着 `originalPath` 与 `thumbnailPath`，卡片直接用后者渲染，无需额外 IPC。
+   */
   listArtworks: (offset = 0, limit = 60) =>
     invoke<ArtworkPage>("list_artworks", { offset, limit }),
-  /** 取作品缩略图（有损 WebP）的绝对路径，配合 convertFileSrc 使用 */
-  thumbnailForArtwork: (id: number, size = 320) =>
-    invoke<string>("thumbnail_for_artwork", { id, size }),
+  /**
+   * 重新生成作品缩略图并把新路径写回数据库。
+   *
+   * 正常路径上不该调它 —— 列表里已经带着 `thumbnailPath`。这是自愈回退：
+   * 缓存被清空 / 文件被删导致 `<img>` 加载失败时调用一次。
+   */
+  thumbnailForArtwork: (id: number) => invoke<string>("thumbnail_for_artwork", { id }),
 };
 
 export type {

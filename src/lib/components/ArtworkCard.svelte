@@ -1,28 +1,36 @@
 <script lang="ts">
   /**
-   * 作品格子：有损 WebP 缩略图 + PID 角标。
+   * 作品格子：缩略图 + PID 角标，点击打开检视弹窗（弹窗里才加载原图）。
    *
-   * 阶段二只做「缩略图 + 虚拟滚动」，点击后的视差检视弹窗按计划留到阶段三 / 阶段四。
-   * 前端始终只拉缩略图，原图不出现在这里。
+   * 缩略图地址来自列表自带的 `thumbnailPath`，卡片不额外发 IPC。
    */
   import type { Artwork } from "$lib/types";
 
-  import Thumbnail from "./Thumbnail.svelte";
+  import ArtworkThumbnail from "./ArtworkThumbnail.svelte";
 
-  let { artwork }: { artwork: Artwork } = $props();
+  let {
+    artwork,
+    onopen,
+  }: { artwork: Artwork; onopen: (artwork: Artwork) => void } = $props();
 </script>
 
-<div
-  class="group relative h-full w-full overflow-hidden rounded-card bg-surface-850
-         ring-1 ring-white/5 transition hover:ring-2 hover:ring-accent-500/70"
-  title={artwork.filePath}
+<button
+  type="button"
+  class="group relative h-full w-full cursor-pointer overflow-hidden rounded-card bg-surface-850
+         ring-1 ring-white/5 transition hover:ring-2 hover:ring-accent-500/70
+         focus:outline-none focus-visible:ring-2 focus-visible:ring-accent-400"
+  title={artwork.originalPath}
+  aria-label={`查看作品 ${artwork.pid} 第 ${artwork.page} 页`}
+  onclick={() => onopen(artwork)}
 >
-  <Thumbnail owner="artwork" id={artwork.id} size={320} alt={artwork.pid} />
+  <div class="absolute inset-0">
+    <ArtworkThumbnail {artwork} />
+  </div>
 
-  <!-- 信息条：PID 常显，文件路径悬停时浮出来 -->
+  <!-- 信息条：PID 常显，原图路径悬停时浮出来 -->
   <div
     class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/85 to-transparent
-           px-2 pt-8 pb-1.5"
+           px-2 pt-8 pb-1.5 text-left"
   >
     <div class="flex items-baseline justify-between gap-2">
       <span class="font-mono text-xs font-semibold text-accent-400" title="Pixiv 作品号">
@@ -33,7 +41,7 @@
     <p
       class="truncate font-mono text-[10px] text-slate-400 opacity-0 transition group-hover:opacity-100"
     >
-      {artwork.filePath}
+      {artwork.originalPath}
     </p>
   </div>
-</div>
+</button>

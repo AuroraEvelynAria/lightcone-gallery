@@ -288,7 +288,11 @@ pub struct ScanSummary {
 pub struct Artwork {
     pub id: i64,
     pub pid: String,
-    pub file_path: String,
+    /// 原图绝对路径。前端只在点击卡片弹窗时才用它。
+    pub original_path: String,
+    /// 缩略图绝对路径。扫描阶段已生成，列表里直接带着走，前端不必为每张卡片
+    /// 再问一次后端。生成失败或缓存被清掉时为 `None`，前端会走一次重生成回退。
+    pub thumbnail_path: Option<String>,
     /// 文件名里的 `_p{num}`
     pub page: i64,
     pub created_at: i64,
@@ -299,7 +303,8 @@ impl Artwork {
         Ok(Self {
             id: row.get("id")?,
             pid: row.get("pid")?,
-            file_path: row.get("file_path")?,
+            original_path: row.get("original_path")?,
+            thumbnail_path: row.get("thumbnail_path")?,
             page: row.get("page")?,
             created_at: row.get("created_at")?,
         })
@@ -328,6 +333,23 @@ pub struct ArtworkScanSummary {
     pub duplicates: usize,
     /// 命名不符合规范、未收进作品库的数量
     pub skipped: usize,
+    /// 本次真正生成 / 重算了缩略图的张数
+    pub thumbnails_generated: usize,
+    /// 缩略图缓存仍然新鲜、直接跳过的张数
+    pub thumbnails_skipped: usize,
+    /// 缩略图生成失败的张数（源文件缺失或解码失败）
+    pub thumbnails_failed: usize,
+}
+
+/// 扫描阶段二的缩略图批量生成结果。只用于内部统计，不直接发给前端。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ThumbnailBatch {
+    /// 本次真正写盘的张数
+    pub generated: usize,
+    /// 缓存仍然新鲜、直接跳过的张数
+    pub skipped: usize,
+    /// 生成失败的张数
+    pub failed: usize,
 }
 
 // ---------------------------------------------------------------------------

@@ -34,15 +34,19 @@ pub fn run() {
             std::fs::create_dir_all(&thumbnail_dir)?;
 
             // asset:// 的 scope 只存在于内存中，每次启动都要重新登记：
-            // 1) 缩略图缓存目录；2) 所有已收录的图库根目录
+            // 1) 缩略图缓存目录；2) 已收录的图库根目录；3) 作品库的扫描根目录（弹窗要显示原图）
             grant_asset_scope(&handle, &thumbnail_dir)?;
 
-            let library_roots: Vec<String> = {
-                let mut stmt = conn.prepare("SELECT path FROM libraries")?;
+            let roots: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT path FROM libraries
+                     UNION
+                     SELECT path FROM artwork_roots",
+                )?;
                 let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
-            for root in library_roots {
+            for root in roots {
                 if let Err(err) = grant_asset_scope(&handle, Path::new(&root)) {
                     // 目录可能已被移动或卸载，记录后继续启动
                     eprintln!("恢复本地资源授权失败 {root}: {err}");
@@ -89,8 +93,7 @@ pub fn run() {
             commands::list_artworks,
             // 阶段二：作品缩略图（有损 WebP）+ 前端虚拟滚动
             commands::thumbnail_for_artwork,
-        ])
-        .build(tauri::generate_context!())
+        ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|handle, event| {

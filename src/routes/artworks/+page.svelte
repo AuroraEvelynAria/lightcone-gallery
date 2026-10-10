@@ -2,19 +2,24 @@
   /**
    * 阶段二：作品库（Pixiv 维度）。
    *
-   * 列表用虚拟滚动渲染，缩略图是 Rust 端生成的有损 WebP。
-   * 前端始终只拉缩略图 —— 原图要等阶段三的检视弹窗才会出现。
+   * 列表用虚拟滚动渲染，缩略图由扫描阶段预生成、地址随列表一起返回，
+   * 卡片直接就能画出来。原图只在点击后的检视弹窗里加载。
    */
   import { onMount } from "svelte";
 
-  import { api } from "$lib/api";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+  import { api, THUMBNAIL_PROGRESS_EVENT } from "$lib/api";
   import { artworks } from "$lib/artworks.svelte";
   import ArtworkCard from "$lib/components/ArtworkCard.svelte";
+  import ArtworkLightbox from "$lib/components/ArtworkLightbox.svelte";
   import VirtualGrid from "$lib/components/VirtualGrid.svelte";
-  import type { ArtworkScanSummary } from "$lib/types";
+  import type { Artwork, ArtworkScanSummary, ThumbnailProgress } from "$lib/types";
 
   let scanning = $state(false);
   let summary = $state<ArtworkScanSummary | null>(null);
+  let thumbProgress = $state<ThumbnailProgress | null>(null);
+  let selected = $state<Artwork | null>(null);
 
   let progress = $derived(
     artworks.total === 0
@@ -24,9 +29,24 @@
 
   onMount(() => {
     void artworks.bootstrap();
+
+    // 扫描时缩略图是批量预生成的，可能持续几十秒，得有进度可看
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<ThumbnailProgress>(THUMBNAIL_PROGRESS_EVENT, (event) => {
+      thumbProgress = event.payload;
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   });
 
-  /** 选择文件夹 -> 调 Rust 端扫描命令 -> 作废旧块重新拉取。 */
+  /** 选择文件夹 -> 扫描入库 + 批量生成缩略图 -> 作废旧块重新拉取。 */
   async function pickAndScan(): Promise<void> {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({
@@ -37,6 +57,7 @@
     if (typeof picked !== "string") return;
 
     scanning = true;
+    thumbProgress = null;
     try {
       summary = await api.scanArtworksFolder(picked);
       // 库里多了行，之前缓存的块偏移量全部作废
@@ -46,6 +67,7 @@
       artworks.error = String(err);
     } finally {
       scanning = false;
+      thumbProgress = null;
     }
   }
 </script>
@@ -91,7 +113,11 @@
         >
           <path stroke-linecap="round" d="M12 3a9 9 0 019 9" />
         </svg>
-        扫描中…
+        {#if thumbProgress}
+          生成缩略图 {thumbProgress.processed}/{thumbProgress.total}
+        {:else}
+          扫描中…
+        {/if}
       {:else}
         选择文件夹并扫描
       {/if}
@@ -104,6 +130,11 @@
       <span class="text-accent-400">{summary.inserted}</span>
       · 去重跳过 <span class="text-amber-400">{summary.duplicates}</span>
       · 命名不符跳过 {summary.skipped}
+      · 缩略图新生成 <span class="text-accent-400">{summary.thumbnailsGenerated}</span>
+      / 复用 {summary.thumbnailsSkipped}
+      {#if summary.thumbnailsFailed > 0}
+        · 失败 <span class="text-rose-400">{summary.thumbnailsFailed}</span>
+      {/if}
     </div>
   {/if}
 
@@ -139,7 +170,7 @@
         {#snippet children(index)}
           {@const artwork = artworks.at(index)}
           {#if artwork}
-            <ArtworkCard {artwork} />
+            <ArtworkCard {artwork} onopen={(item) => (selected = item)} />
           {:else}
             <div class="h-full w-full animate-pulse rounded-card bg-surface-850"></div>
           {/if}
@@ -148,3 +179,10 @@
     {/if}
   </main>
 </div>
+
+{#if selected}
+  <!-- 按 id 作 key：换一张作品时把「已加载 / 加载失败」的状态一起重置 -->
+  {#key selected.id}
+    <ArtworkLightbox artwork={selected} onclose={() => (selected = null)} />
+  {/key}
+{/if}

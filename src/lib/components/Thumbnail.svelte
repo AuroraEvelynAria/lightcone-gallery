@@ -1,21 +1,18 @@
 <script lang="ts">
   /**
-   * 缩略图：进入视口附近才请求后端生成 / 读取，避免一次性解码上千张图。
+   * 通用图库的缩略图：进入视口附近才向后端要路径，避免一次性解码上千张图。
+   *
+   * 作品库（`/artworks`）不用这个组件 —— 那边的缩略图地址随列表一起返回，
+   * 卡片直接渲染 `<img>` 即可，见 `ArtworkThumbnail.svelte`。
    *
    * 走 `withThumbnailSlot` 排队，防止滚动时同时抛出一整屏解码任务。
-   * `owner` 决定去 `images` 还是 `artworks` 里找源文件。
    */
   import { convertFileSrc } from "@tauri-apps/api/core";
 
   import { api } from "$lib/api";
   import { withThumbnailSlot } from "$lib/thumbnailQueue";
 
-  let {
-    owner = "image",
-    id,
-    size = 320,
-    alt = "",
-  }: { owner?: "image" | "artwork"; id: number; size?: number; alt?: string } = $props();
+  let { id, size = 320, alt = "" }: { id: number; size?: number; alt?: string } = $props();
 
   let element = $state<HTMLElement | null>(null);
   let source = $state<string | null>(null);
@@ -43,11 +40,10 @@
   $effect(() => {
     const node = element;
     const currentId = id;
-    const currentOwner = owner;
     const currentSize = size;
     if (!node) return;
 
-    // 依赖 currentId：虚拟滚动会复用组件实例来渲染不同的条目，
+    // 依赖 currentId：列表刷新后同一个实例可能被复用去渲染另一张图，
     // id 一变就得把上一张的状态清干净，否则会显示出错位的缩略图。
     source = null;
     failed = false;
@@ -57,7 +53,7 @@
       (entries) => {
         if (!entries.some((entry) => entry.isIntersecting)) return;
         observer.disconnect();
-        void load(currentId, currentOwner, currentSize);
+        void load(currentId, currentSize);
       },
       // 提前一屏预取，滚动时不会看到大片占位
       { root: scrollContainer(node), rootMargin: "400px" },
@@ -67,19 +63,11 @@
     return () => observer.disconnect();
   });
 
-  async function load(
-    targetId: number,
-    targetOwner: "image" | "artwork",
-    targetSize: number,
-  ): Promise<void> {
+  async function load(targetId: number, targetSize: number): Promise<void> {
     if (requestedId === targetId) return;
     requestedId = targetId;
     try {
-      const path = await withThumbnailSlot(() =>
-        targetOwner === "artwork"
-          ? api.thumbnailForArtwork(targetId, targetSize)
-          : api.thumbnailFor(targetId, targetSize),
-      );
+      const path = await withThumbnailSlot(() => api.thumbnailFor(targetId, targetSize));
       // 请求排队期间 id 可能又被换掉（快速滚动），过期的结果直接丢掉
       if (requestedId !== targetId) return;
       source = convertFileSrc(path);
@@ -107,8 +95,8 @@
           stroke-linecap="round"
           stroke-linejoin="round"
           d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 21h16.5A2.25 2.25 0 0022.5 18.75V5.25A2.25 2.25 0 0020.25 3H3.75A2.25 2.25 0 001.5 5.25v13.5A2.25 2.25 0 003.75 21z"
-      />
-    </svg>
+        />
+      </svg>
     </div>
   {:else}
     <div class="h-full w-full animate-pulse bg-surface-850"></div>
