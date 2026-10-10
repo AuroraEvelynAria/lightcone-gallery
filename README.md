@@ -67,7 +67,8 @@ cd src-tauri && cargo test   # 后端测试
 │  │     ├─ VirtualGrid.svelte   # 定高网格虚拟滚动（纯 CSS，无滚动库）
 │  │     ├─ ArtworkCard.svelte   # 作品格子（可点击）
 │  │     ├─ ArtworkThumbnail.svelte # 直接用列表里的 thumbnailPath + 失败回退
-│  │     ├─ ArtworkLightbox.svelte  # 检视弹窗（唯一加载原图的地方）
+│  │     ├─ ArtworkLightbox.svelte  # 作品库检视弹窗（PID 栏 + 查看器内核）
+│  │     ├─ ImageViewer.svelte   # 查看器内核：光锥 3D / 缩放 / 平移 / 全屏（唯一加载原图的地方）
 │  │     ├─ Thumbnail.svelte     # 通用图库的懒加载缩略图
 │  │     └─ Lightbox.svelte      # 大图查看 + 标签 / 评分编辑
 │  └─ routes/
@@ -115,7 +116,7 @@ cd src-tauri && cargo test   # 后端测试
 
 ## 数据库设计
 
-迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 **v2**：
+迁移基于 `PRAGMA user_version`，见 `src-tauri/src/db/schema.rs`。当前为 **v4**：
 
 **通用图库（v1）**
 
@@ -126,10 +127,11 @@ cd src-tauri && cargo test   # 后端测试
 - `thumbnails` — 缩略图缓存登记表
 - `settings` — 预留的键值设置
 
-**作品维度（v2 新增，v3 改列名）**
+**作品维度（v2 新增，v3 改列名，v4 加忽略名单）**
 
 - `artworks` — 只收录文件名符合 `{pid}_p{num}` 的图片，一行代表「某作品的某一页」；`original_path` 是原图，`thumbnail_path` 是扫描阶段预生成的缩略图
 - `artwork_roots` — 作品库扫描过的根目录
+- `ignored_artworks` — 被移出过作品库的 `(pid, page)`，扫描时跳过它们
 
 `artworks` 与 `images` 是**两套并存的索引**：`images` 是通用图库（标签 / 相册 / 缩略图挂在它上面），`artworks` 只做作品维度。两者互不影响，所以作品库的新增不会动到已有图库功能。
 
@@ -138,6 +140,10 @@ cd src-tauri && cargo test   # 后端测试
 > **v3 的三处改动各有理由**：`file_path` 改名 `original_path`，是因为查询命令对外返回的就是 `pid / original_path / thumbnail_path`，列名跟着走免得每层翻译一次；新增 `thumbnail_path` 让列表自带缩略图地址，卡片不必再往返 IPC；`artwork_roots` 落盘是因为 `asset://` 的作用域**只存在于内存中**（见启动流程），不记下来就没法在重启后重新授权原图目录。
 >
 > 启动时还有一步幂等修复：如果库里有作品行但 `artwork_roots` 是空的（老库升级上来就是这个状态），就从现有的 `original_path` 反推所在目录补登一次。不做的话那些原图不在授权范围内，弹窗会莫名加载失败。登记过就只花一次 `COUNT` 查询。
+
+> **v4 加 `ignored_artworks` 是为了让「移除」真的算数。** 在此之前移除只是删行，重新扫描同一目录会把它们原封不动地收回来，用户看到的就是「移除了又回来了」。记的是 `(pid, page)` 而不是 `artworks.id`：id 是自增的，重扫会换一个，只有 `(pid, page)` 稳定。代价是误移之后光重扫没用，得先清空名单 —— 所以作品库页头留了一个「已忽略 N 条 · 清空」的出口。
+
+> **每一版迁移都与它自己的 `user_version` 在同一个事务里提交**（见 `schema.rs` 的 `apply`）。这不是洁癖：开发时改到一半被 `tauri dev` 重启，就出现过「`CREATE TABLE` 成功、版本号没落盘」，下一次启动重跑同一版迁移直接撞 `table ... already exists`，应用起不来。`user_version` 存在数据库头部、本身受事务保护，所以 `BEGIN; DDL; PRAGMA user_version = N; COMMIT;` 是原子的。`MIGRATION_V4` 另加了 `IF NOT EXISTS` 让已经处于半吊子状态的库自愈，回归测试见 `db::schema::tests::recovers_from_a_half_applied_migration`。
 
 外键均带 `ON DELETE CASCADE`，连接建立时开启 `foreign_keys`；写库使用 WAL 与 `synchronous=NORMAL`。
 
@@ -155,11 +161,13 @@ cd src-tauri && cargo test   # 后端测试
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
 | 外观（阶段三） | `set_window_material` `load_settings` `save_settings` |
-| 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` `remove_artworks` |
+| 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` `remove_artworks` `count_ignored_artworks` `clear_ignored_artworks` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
 
-`scan_artworks_folder(path)` 接收一个文件夹路径：遍历图片、解析 `{pid}_p{num}` 入库，**再为缺缩略图的作品批量生成 WebP 并把路径写回数据库**。返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0），`thumbnailsGenerated` / `thumbnailsSkipped` / `thumbnailsFailed` 反映本轮缩略图 pass 的产出。`list_artworks(offset, limit)` 分页返回 `pid / original_path / thumbnail_path`，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。`thumbnail_for_artwork(id)` 只是自愈回退，正常路径上前端不会调它。`remove_artworks(ids)` 把作品移出作品库（删记录 + 清缩略图缓存），**不删除原图**。
+`scan_artworks_folder(path)` 接收一个文件夹路径：遍历图片、解析 `{pid}_p{num}` 入库，**再为缺缩略图的作品批量生成 WebP 并把路径写回数据库**。返回的 `inserted` / `duplicates` 直接体现去重效果（重复扫描同一目录时 `inserted` 为 0），`thumbnailsGenerated` / `thumbnailsSkipped` / `thumbnailsFailed` 反映本轮缩略图 pass 的产出。`list_artworks(offset, limit)` 分页返回 `pid / original_path / thumbnail_path`，`limit` 上限 200，按 pid 数值倒序（`CAST(pid AS INTEGER)`，否则字符串排序会让 `999` 排在 `12345` 之后）。`thumbnail_for_artwork(id)` 只是自愈回退，正常路径上前端不会调它。`remove_artworks(ids)` 把作品移出作品库（删记录 + 清缩略图缓存 + 记入忽略名单），**不删除原图**；`count_ignored_artworks()` / `clear_ignored_artworks()` 是那份名单的读与清空。
+
+扫描返回值里 `ignored` 是被忽略名单主动跳过的条数，与 `duplicates`（撞唯一索引）区分开 —— 前者是「用户不想要」，后者是「目录里有重复文件」。
 
 ## 关键实现说明
 
@@ -205,6 +213,13 @@ cd src-tauri && cargo test   # 后端测试
 
 **外观偏好的两条持久化路径**：数据库 `settings` 表是**权威来源**（WebView 的 localStorage 会被清缓存顺手清掉，用户挑的外观不该跟着消失）；localStorage 只作**首帧缓存**，构造时同步读一次并立刻落到 DOM 上，页面第一帧就是用户选的样子。读取时对取值做校验（`isSchemeId` 等），免得以后删掉某个方案后旧设置把界面指到一个不存在的配色上。
 
+**检视弹窗：一层共享的查看器内核**。`ImageViewer.svelte` 承载光锥 3D 视差、缩放平移与全屏，通用图库的 `Lightbox`（带信息面板）与作品库的 `ArtworkLightbox`（带 PID 栏）都只是它的外壳 —— 之前这套视差只长在作品库那边，而用户真正在浏览的是通用图库。两条硬约束写在文件头注释里：
+
+- **缩放只能加在图片上，不能加在裁切框上**。圆角裁切那层带 `overflow: hidden`，`scale()` 会把圆角一起放大。所以缩放加在它里面的 `<img>` 上，裁切框保持不动 —— 观感上是「透过一张卡片看放大的图」。
+- **图片显示尺寸用 JS 算，不用 `max-height: 100%`**。百分比 `max-height` 在「高度 auto 的祖先链」里会被当成 `none` 直接失效；而平移必须知道精确的显示尺寸才能把位移夹在「图片边缘不越过裁切框」的范围内。所以 `natural` × 容器盒子在 JS 里算成整数像素写死在元素上。
+
+全屏走 Tauri 的 `setFullscreen`（capabilities 需要 `core:window:allow-set-fullscreen`，`core:default` 只给了查询没给设置），在纯浏览器里回退到 Fullscreen API；全屏时通知外壳收起侧边面板，可用区域变大后显示尺寸重算，图片自动撑满。放大后自动关掉倾斜 —— 鼠标改负责平移，再叠 3D 会晕。
+
 **SQL 注入防护**：筛选条件全部走 `?` 占位符 + `Vec<Value>` 绑定；排序字段通过 `SortBy::column()` 的白名单映射落地，不拼接前端传来的字符串。
 
 **退出时 checkpoint**：Tauri 的退出路径会直接结束进程、跳过 Rust 析构，`Connection` 不会走 `Drop`，WAL 也就永远合并不回主库（实测退出后主库仍停在 4096 字节、WAL 有 156 KB）。因此 `lib.rs` 用 `app.run(|handle, event| ...)` 捕获 `RunEvent::Exit`，在退出前显式执行 `PRAGMA wal_checkpoint(TRUNCATE)`。这样主库文件始终是自洽的——单独备份 `gallery.db` 不会丢数据。
@@ -219,8 +234,8 @@ cd src-tauri && cargo test   # 后端测试
 - **换成 WebP 后旧缓存会变孤儿**：缓存路径从 `<尺寸>/<id>.jpg` 改成 `<归属域>/<尺寸>/<id>.webp`，旧 JPEG 不会再被读取，但会留在磁盘上。侧栏底部的「清理」按钮可以一次性清掉，下次浏览按需重建。
 - **虚拟滚动是定高网格**：格子尺寸只由「列数 × 容器宽度」推出，所以所有格子必须同宽同高（`object-cover` 裁切）。要做行高不齐的瀑布流得另写组件——那需要逐格测量与位置缓存，本项目的 3D 视差弹窗（阶段四）不依赖它。
 - **扫描会连带生成缩略图，因此首次索引慢**：约 23ms/张（并行后 2000 张约 12s、10000 张约 58s）。这是「扫描时预生成」换来的浏览零等待。若更在意扫描速度，把 `generate_thumbnails` 从 `scan_artworks_folder` 里摘出去、改成按需调用即可，缓存与回退逻辑都不用动。
-- **检视弹窗还不能翻页**：只有单张显示 + Esc / 点空白关闭。RhinE 工业科技风的重构与 3D 视差弹窗是阶段三 / 四的内容。
-- **作品库的移除不是「永久拉黑」**：`remove_artworks` 删的是数据库记录，所以重新扫描同一个目录时它们会**再次入库**（唯一索引不再挡住它们）。要做「移除了就永远不再收录」需要一张忽略表，`scan_folder` 插入前先查它 —— 目前没做。
+- **弹窗翻页只覆盖「已加载」的范围**：通用图库那边翻到已加载列表的边界会自动 `loadMore()` 再翻，但一次只补一页；作品库那边靠 `artworks.fetchAt()` 等数据块到位，等不到就原地不动（不会切到空白）。两边都不做相邻原图预加载 —— 项目的硬约束是「原图只在弹窗里出现」，预加载等于把没在看的原图也拉进内存。
+- **移除的「反悔」是整表清空，不是逐条撤销**：移除会把 `(pid, page)` 记进 `ignored_artworks`，所以重扫不会收回来；但想撤销只能清空整份名单（作品库页头的「已忽略 N 条 · 清空」），没有逐条恢复。名单通常很小，暂不值得为它做一套管理界面。
 - **作品库不刷新已移动文件的路径**：`scan_artworks_folder` 用 `ON CONFLICT DO NOTHING` 实现去重（这也让 `duplicates` 计数能如实反映去重效果），代价是文件被移动后 `original_path` 仍指向旧位置，缩略图会随之变成「源文件缺失」。若要自动刷新，把冲突分支改成 `DO UPDATE SET original_path = excluded.original_path`，但那样就分不清「新增」和「更新」了。
 - **作品库只能扫「目录」，不能复用已登记的图库**：`artworks` 是独立索引，只有通过作品库页面的「选择文件夹并扫描」明确扫过的目录才会进去；侧栏「添加图库」登记的是通用图库（`images` 表）。同一个目录两边都索引会存两份缩略图（320px + 400px）。要合并成一套需要给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
 - **扫描是单线程的**：`scanner.rs`（通用图库）顺序遍历；作品库那边的**缩略图生成**已经并行（见 `ensure_parallel`），但目录遍历本身仍是串行。目录很大时可引入 `rayon` 并行读取元数据，注意 SQLite 写入仍需串行。

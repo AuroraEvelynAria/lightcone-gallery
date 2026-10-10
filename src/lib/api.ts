@@ -115,9 +115,15 @@ export const api = {
   thumbnailForArtwork: (id: number) => invoke<string>("thumbnail_for_artwork", { id }),
   /**
    * 把作品移出作品库：删记录与缩略图缓存，**不删除原图**。
+   *
+   * 顺带把 `(pid, page)` 记进忽略名单，重扫同一目录不会再收回来。
    * 返回实际删掉的行数（传进来的 id 可能有一部分已经不存在）。
    */
   removeArtworks: (ids: number[]) => invoke<number>("remove_artworks", { ids }),
+  /** 忽略名单里有多少条（之前被移出过作品库的 `(pid, page)`）。 */
+  countIgnoredArtworks: () => invoke<number>("count_ignored_artworks"),
+  /** 清空忽略名单，返回清掉的条数。之后重扫目录会把它们再收回来。 */
+  clearIgnoredArtworks: () => invoke<number>("clear_ignored_artworks"),
 };
 
 export type {

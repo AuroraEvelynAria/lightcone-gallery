@@ -333,6 +333,8 @@ pub struct ArtworkScanSummary {
     pub duplicates: usize,
     /// 命名不符合规范、未收进作品库的数量
     pub skipped: usize,
+    /// 在忽略名单里、被主动跳过的数量（之前被移出过作品库）
+    pub ignored: usize,
     /// 本次真正生成 / 重算了缩略图的张数
     pub thumbnails_generated: usize,
     /// 缩略图缓存仍然新鲜、直接跳过的张数

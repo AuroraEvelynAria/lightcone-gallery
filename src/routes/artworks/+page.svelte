@@ -22,6 +22,10 @@
   let selected = $state<Artwork | null>(null);
   /** 弹窗当前这张在库里的序号，翻页要用。 */
   let selectedIndex = $state<number | null>(null);
+  /** 忽略名单条数：被移出过、重扫也不会再收进来的作品。 */
+  let ignoredCount = $state(0);
+  /** 清空忽略名单的二次确认，与移除按钮同一套手势。 */
+  let confirmingClear = $state(false);
 
   /** 选择模式：卡片上出现勾选框，点卡片是勾选而不是打开弹窗。 */
   let selecting = $state(false);
@@ -38,6 +42,7 @@
 
   onMount(() => {
     void artworks.bootstrap();
+    void refreshIgnored();
 
     // 扫描时缩略图是批量预生成的，可能持续几十秒，得有进度可看
     let unlisten: UnlistenFn | undefined;
@@ -72,6 +77,7 @@
       // 库里多了行，之前缓存的块偏移量全部作废
       artworks.reset();
       await artworks.bootstrap();
+      await refreshIgnored();
     } catch (err) {
       artworks.error = String(err);
     } finally {
@@ -79,6 +85,40 @@
       thumbProgress = null;
     }
   }
+
+  async function refreshIgnored(): Promise<void> {
+    try {
+      ignoredCount = await api.countIgnoredArtworks();
+    } catch (err) {
+      artworks.error = String(err);
+    }
+  }
+
+  /**
+   * 清空忽略名单。
+   *
+   * 「移除」会顺带把 `(pid, page)` 记进忽略名单，重扫才不会把它们收回来。
+   * 代价是误移之后光重扫没用，得先清名单 —— 所以这里必须留一个显眼的出口。
+   */
+  async function clearIgnored(): Promise<void> {
+    try {
+      const cleared = await api.clearIgnoredArtworks();
+      await refreshIgnored();
+      artworks.error = null;
+      artworks.notice = `已清空忽略名单（${cleared} 条），重新扫描目录即可再次收录`;
+    } catch (err) {
+      artworks.error = String(err);
+    } finally {
+      confirmingClear = false;
+    }
+  }
+
+  // 提示 4 秒后自动消失，免得一直挂在页头
+  $effect(() => {
+    if (!artworks.notice) return;
+    const timer = setTimeout(() => (artworks.notice = null), 4000);
+    return () => clearTimeout(timer);
+  });
 
   function toggleSelect(artwork: Artwork): void {
     const next = new Set(picked);
@@ -124,6 +164,7 @@
       artworks.refreshAfterRemoval(removed);
       picked = new Set();
       confirmingBatch = false;
+      await refreshIgnored();
     } catch (err) {
       artworks.error = String(err);
     } finally {
@@ -176,6 +217,23 @@
       </button>
     {/if}
 
+    {#if ignoredCount > 0}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md border px-3 py-1.5 text-xs transition {confirmingClear
+          ? 'border-rose-600 bg-rose-600/90 text-white'
+          : 'border-surface-700 text-muted hover:border-surface-600 hover:text-fg'}"
+        title="这些作品被移出过作品库，重新扫描目录也不会再收进来。清空后重扫即可再次收录。"
+        onclick={() => {
+          if (confirmingClear) void clearIgnored();
+          else confirmingClear = true;
+        }}
+        onmouseleave={() => (confirmingClear = false)}
+      >
+        {confirmingClear ? `确认清空 ${ignoredCount} 条？` : `已忽略 ${ignoredCount} 条 · 清空`}
+      </button>
+    {/if}
+
     <button
       type="button"
       class="flex cursor-pointer items-center gap-1.5 rounded-md bg-accent-600 px-3 py-1.5 text-sm
@@ -210,6 +268,9 @@
       <span class="text-accent-400">{summary.inserted}</span>
       · 去重跳过 <span class="text-amber-400">{summary.duplicates}</span>
       · 命名不符跳过 {summary.skipped}
+      {#if summary.ignored > 0}
+        · 已忽略跳过 <span class="text-accent-400">{summary.ignored}</span>
+      {/if}
       · 缩略图新生成 <span class="text-accent-400">{summary.thumbnailsGenerated}</span>
       / 复用 {summary.thumbnailsSkipped}
       {#if summary.thumbnailsFailed > 0}
@@ -221,6 +282,14 @@
   {#if artworks.error}
     <div class="m-5 rounded-md border border-rose-900/60 bg-rose-950/60 px-4 py-2.5 text-sm text-rose-200">
       {artworks.error}
+    </div>
+  {/if}
+
+  {#if artworks.notice}
+    <div
+      class="border-b border-surface-800 bg-accent-500/10 px-5 py-2 text-[11px] text-accent-400"
+    >
+      {artworks.notice}
     </div>
   {/if}
 
@@ -311,7 +380,7 @@
         取消选择
       </button>
 
-      <span class="text-[10px] text-mark">只从作品库移除，不删除原图</span>
+      <span class="text-[10px] text-mark">只从作品库移除，不删除原图；重扫也不会再收回来</span>
     </div>
   </div>
 {/if}

@@ -10,7 +10,7 @@ use rusqlite::{Connection, params};
 use crate::error::AppResult;
 
 /// 当前 schema 版本，与下面最后一个迁移分支保持一致。
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 /// v1：图库、图片、相册、标签、缩略图缓存与键值设置。
 const MIGRATION_V1: &str = r#"
@@ -138,24 +138,40 @@ CREATE TABLE artwork_roots (
 );
 "#;
 
+/// 4. `ignored_artworks` 记录「被移出作品库」的 `(pid, page)`。
+///
+/// 没有这张表时「移除」只是删行，重新扫描同一目录会把它们再收回来 —— 从用户
+/// 视角看就是「移除了又回来了」。有了它，移除才是真的移除。
+/// 刻意按 `(pid, page)` 而不是 `id` 记：重扫会拿到新的自增 id，pid 才是稳定的身份。
+///
+/// `IF NOT EXISTS` 不是随手加的：这一版上线前踩过「表建好了、`user_version` 没落盘」
+/// 的半吊子状态（见 `apply` 的注释），已经处于该状态的库要靠它自愈。
+const MIGRATION_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS ignored_artworks (
+    pid        TEXT NOT NULL,
+    page       INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (pid, page)
+);
+"#;
+
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
     if version < 1 {
-        conn.execute_batch(MIGRATION_V1)?;
+        apply(conn, 1, MIGRATION_V1)?;
     }
     if version < 2 {
-        conn.execute_batch(MIGRATION_V2)?;
+        apply(conn, 2, MIGRATION_V2)?;
     }
     if version < 3 {
-        conn.execute_batch(MIGRATION_V3)?;
+        apply(conn, 3, MIGRATION_V3)?;
+    }
+    if version < 4 {
+        apply(conn, 4, MIGRATION_V4)?;
     }
 
-    // 后续迁移在此追加： if version < 4 { conn.execute_batch(MIGRATION_V4)?; }
-
-    if version != SCHEMA_VERSION {
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    }
+    // 后续迁移在此追加： if version < 5 { apply(conn, 5, MIGRATION_V5)?; }
 
     // v3 之前入库的作品行从没登记过扫描根目录。这里反推补一次，同时覆盖两条路径：
     // 「从老库升级上来」以及「库已经停在 v3、但 v3 迁移早于这段逻辑上线」。
@@ -166,6 +182,28 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+/// 跑一版迁移，并把它自己的版本号一起提交。
+///
+/// DDL 与 `user_version` 必须在同一个事务里。分开写的后果不是理论上的：开发时
+/// 改到一半被重启，就出现过「`CREATE TABLE` 成功、版本号没落盘」，下一次启动
+/// 重跑同一版迁移直接撞 `table ... already exists`，应用起不来。
+/// `user_version` 存在数据库头部，本身是受事务保护的，所以这样写是原子的。
+fn apply(conn: &Connection, version: i32, sql: &str) -> AppResult<()> {
+    conn.execute_batch("BEGIN")?;
+    match conn.execute_batch(sql) {
+        Ok(()) => {
+            conn.pragma_update(None, "user_version", version)?;
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(err) => {
+            // 回滚本身失败不重要，原始错误才是要报出去的
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err.into())
+        }
+    }
 }
 
 /// 从现有 `original_path` 反推作品所在的目录，补登进 `artwork_roots`。
@@ -266,6 +304,29 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 0, "级联删除未生效");
+    }
+
+    /// 「表建好了、版本号没落盘」的半吊子状态必须能自愈。
+    ///
+    /// 这不是假想：开发时改到一半被 `tauri dev` 重启，就留下过这样一个库，
+    /// 下一次启动直接撞 `table ignored_artworks already exists` 起不来。
+    #[test]
+    fn recovers_from_a_half_applied_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // 造一个「停在 v3、但 v4 的表已经建好」的库
+        conn.execute_batch(MIGRATION_V1).unwrap();
+        conn.execute_batch(MIGRATION_V2).unwrap();
+        conn.execute_batch(MIGRATION_V3).unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch(MIGRATION_V4).unwrap();
+
+        migrate(&conn).expect("半吊子状态应当自愈，而不是报 already exists");
+
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION, "自愈后版本号应当补上");
     }
 
     /// v1 老库一路升到当前版本，必须保留原有数据。

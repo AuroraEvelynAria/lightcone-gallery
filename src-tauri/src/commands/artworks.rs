@@ -130,6 +130,9 @@ pub async fn list_artworks(
 /// **绝不碰原图** —— 这是「移出索引」，不是删除文件。原图始终留在用户自己的
 /// 目录里，这也是整个项目的硬约束（应用对图库目录只读不写）。
 ///
+/// 顺带把 `(pid, page)` 记进忽略名单，重扫同一目录不会再收回来 —— 否则
+/// 「移除」在用户眼里等于没做。想反悔就用 `clear_ignored_artworks` 清空名单。
+///
 /// 缩略图缓存顺手清掉：它是按 `artworks.id` 命名的，行删了以后重扫会拿到新的
 /// 自增 id，旧文件永远不会再被读到，留着就是孤儿。
 ///
@@ -139,6 +142,19 @@ pub async fn remove_artworks(state: State<'_, AppState>, ids: Vec<i64>) -> AppRe
     let cache_dir = state.thumbnail_dir.clone();
     with_db(&state, move |conn| artworks::remove(conn, &cache_dir, &ids)).await
 }
+
+/// 忽略名单里有多少条 `(pid, page)`。作品库页头用它显示「已忽略 N 条」。
+#[tauri::command]
+pub async fn count_ignored_artworks(state: State<'_, AppState>) -> AppResult<usize> {
+    with_db(&state, |conn| artworks::count_ignored(conn)).await
+}
+
+/// 清空忽略名单，返回清掉的条数。之后重新扫描目录会把它们再收回来。
+#[tauri::command]
+pub async fn clear_ignored_artworks(state: State<'_, AppState>) -> AppResult<usize> {
+    with_db(&state, |conn| artworks::clear_ignored(conn)).await
+}
+
 /// 重新生成一张作品的缩略图并把新路径写回数据库，返回该路径。
 ///
 /// 正常路径上前端**不该**调它 —— 列表里已经带着 `thumbnail_path` 了。

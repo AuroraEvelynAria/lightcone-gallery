@@ -22,6 +22,8 @@ class ArtworkIndex {
   /** 首块是否已经取过，用来区分「还没加载」与「库确实是空的」。 */
   booted = $state(false);
   error = $state<string | null>(null);
+  /** 操作成功的提示（与 error 分开，免得成功也染成红色）。 */
+  notice = $state<string | null>(null);
 
   #blocks = new Map<number, Artwork[]>();
   #inflight = new Set<number>();

@@ -99,6 +99,8 @@ pub fn run() {
             commands::thumbnail_for_artwork,
             // 阶段四：把作品移出作品库（不动原图）
             commands::remove_artworks,
+            commands::count_ignored_artworks,
+            commands::clear_ignored_artworks,
         ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

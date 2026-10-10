@@ -7,9 +7,10 @@
 //!
 //! 两个索引互不影响，因此新增作品维度不会动到已有图库的任何功能。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use walkdir::WalkDir;
 
 use crate::db::models::{ArtworkScanSummary, ThumbnailBatch};
@@ -90,6 +91,15 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
     let now = now_unix();
     let mut inserted = 0usize;
     let mut duplicates = 0usize;
+    let mut ignored = 0usize;
+
+    // 忽略名单：之前被从作品库移除过的 `(pid, page)` 不再收回来。
+    // 没有这一步，「移除」就只是删行，重扫同一个目录它们会原封不动地回来。
+    let skipped_pairs: HashSet<(String, i64)> = {
+        let mut stmt = conn.prepare("SELECT pid, page FROM ignored_artworks")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()?
+    };
 
     let tx = conn.transaction()?;
     {
@@ -100,6 +110,10 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
              ON CONFLICT(pid, page) DO NOTHING",
         )?;
         for (pid, page, original_path) in &matched {
+            if skipped_pairs.contains(&(pid.clone(), *page)) {
+                ignored += 1;
+                continue;
+            }
             // changes() 返回 0 即表示这一行被唯一索引挡掉了
             if stmt.execute(params![pid, original_path, page, now])? > 0 {
                 inserted += 1;
@@ -125,6 +139,7 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
         inserted,
         duplicates,
         skipped: discovered - matched_count,
+        ignored,
         thumbnails_generated: 0,
         thumbnails_skipped: 0,
         thumbnails_failed: 0,
@@ -136,6 +151,11 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
 /// **绝不碰原图** —— 这是「移出索引」而不是删除文件，应用对图库目录始终只读。
 /// 这条承诺由 `remove_drops_rows_and_thumbnails_but_never_the_original` 守着。
 ///
+/// 顺带把 `(pid, page)` 记进忽略名单，重扫同一目录不会再收回来。
+/// 不这么做的话「移除」只是删行，用户会看到它们原封不动地回来。
+/// 记的是 `pid` 而不是 `id`：id 是自增的，重扫会换一个，只有 `(pid, page)` 稳定。
+/// 想反悔就用 `clear_ignored` 清空名单，之后重扫会把它们再收回来。
+///
 /// 缩略图缓存顺手清掉：它按 `artworks.id` 命名，行删了以后重扫会拿到新的自增 id，
 /// 旧文件永远不会再被读到，留着就是孤儿。
 pub fn remove(conn: &mut Connection, cache_dir: &Path, ids: &[i64]) -> AppResult<usize> {
@@ -143,13 +163,32 @@ pub fn remove(conn: &mut Connection, cache_dir: &Path, ids: &[i64]) -> AppResult
         return Ok(0);
     }
 
+    let now = now_unix();
     let tx = conn.transaction()?;
     let mut removed = 0usize;
     {
-        let mut stmt = tx.prepare("DELETE FROM artworks WHERE id = ?1")?;
+        // 先问出身份再删，所以查和删要成对出现
+        let mut select = tx.prepare("SELECT pid, page FROM artworks WHERE id = ?1")?;
+        let mut delete = tx.prepare("DELETE FROM artworks WHERE id = ?1")?;
+        let mut ignore = tx.prepare(
+            "INSERT INTO ignored_artworks (pid, page, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(pid, page) DO NOTHING",
+        )?;
+
         for id in ids {
+            let identity: Option<(String, i64)> = select
+                .query_row([id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .optional()?;
+
             // 传进来的 id 可能有一部分已经不存在了，按实际影响行数计
-            removed += stmt.execute([id])?;
+            if delete.execute([id])? == 0 {
+                continue;
+            }
+            removed += 1;
+
+            if let Some((pid, page)) = identity {
+                ignore.execute(params![pid, page, now])?;
+            }
         }
     }
     tx.commit()?;
@@ -166,6 +205,17 @@ pub fn remove(conn: &mut Connection, cache_dir: &Path, ids: &[i64]) -> AppResult
     }
 
     Ok(removed)
+}
+
+/// 忽略名单里有多少条 `(pid, page)`。
+pub fn count_ignored(conn: &Connection) -> AppResult<usize> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM ignored_artworks", [], |row| row.get(0))?;
+    Ok(count as usize)
+}
+
+/// 清空忽略名单，返回清掉的条数。之后重新扫描目录会把它们再收回来。
+pub fn clear_ignored(conn: &Connection) -> AppResult<usize> {
+    Ok(conn.execute("DELETE FROM ignored_artworks", [])?)
 }
 
 /// 为库里缺缩略图（或缓存已过期）的作品生成缩略图，并把路径回填 `thumbnail_path`。
@@ -493,6 +543,51 @@ mod tests {
         // 不存在的 id 与空列表都不该报错
         assert_eq!(remove(&mut conn, &cache, &[999_999]).unwrap(), 0);
         assert_eq!(remove(&mut conn, &cache, &[]).unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    /// 移除过的作品不该在重扫时回来 —— 否则「移除」在用户眼里等于没做。
+    #[test]
+    fn removed_artworks_stay_out_of_the_next_scan() {
+        let root = make_root("ignore-rescan");
+        write_image(&root.join("666_p0.jpg"));
+        write_image(&root.join("666_p1.jpg"));
+        write_image(&root.join("777_p0.jpg"));
+
+        let cache = make_root("ignore-cache");
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+
+        let target: i64 = conn
+            .query_row(
+                "SELECT id FROM artworks WHERE pid = '666' AND page = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remove(&mut conn, &cache, &[target]).unwrap(), 1);
+        assert_eq!(count_ignored(&conn).unwrap(), 1, "移除应写入忽略名单");
+
+        // 重扫同一目录：666_p1 应当被忽略名单挡住
+        let summary = scan_folder(&mut conn, &root).unwrap();
+        assert_eq!(summary.ignored, 1, "被移除过的那一页应计入 ignored");
+        assert_eq!(summary.inserted, 0, "不该有任何新行");
+        let back: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM artworks WHERE pid = '666' AND page = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(back, 0, "移除过的作品不该被重扫收回来");
+
+        // 清空名单之后应当能重新收录
+        assert_eq!(clear_ignored(&conn).unwrap(), 1);
+        assert_eq!(count_ignored(&conn).unwrap(), 0);
+        let summary = scan_folder(&mut conn, &root).unwrap();
+        assert_eq!(summary.inserted, 1, "清空忽略名单后应当重新收录");
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&cache);
