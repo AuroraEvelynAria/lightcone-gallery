@@ -53,11 +53,13 @@
    *         .viewer__stack 竖排：卡片在上，信息行在下
    *           .viewer__scene   入场动画（缩放 + 轻微翻转）
    *             .viewer__card  preserve-3d，跟鼠标做 rotateX / rotateY
-   *               .viewer__halo   translateZ(-64px)  光锥底（背光场）
+   *               .viewer__ambient translateZ(-64px) 环境光（同一张原图糊开）
+   *               .viewer__halo   translateZ(-96px)  光锥底（accent 背光场）
    *               .viewer__shot   translateZ(0)      原图（圆角裁切在这层）
    *               .viewer__glare  translateZ(24px)   扫光（overlay）
    *               .viewer__sheen  translateZ(26px)   斜光（color-dodge）
-   *           .viewer__meta    普通布局，**不在 3D 层里**（见下）
+   *           .viewer__meta    普通布局，**不在 3D 层里**（见下）；只吃
+   *                            --meta-x/y 的 ±6px 平移微视差，不旋转
    * ```
    *
    * ## 两条必须守住的规则
@@ -124,6 +126,8 @@
 
   /** 最大倾角。卡牌类效果常用 ±14°，检视大图收敛到 7° 更稳。 */
   const MAX_TILT = 7;
+  /** 信息行微视差幅度（px）。沿鼠标反方向浮，要空间感但不动摇可读性。 */
+  const META_PARALLAX = 6;
   /** 每帧向目标插值的比例，≈140ms 时间常数。 */
   const EASE = 0.12;
   /** 收敛阈值，低于它就停掉 rAF。 */
@@ -297,6 +301,10 @@
       stageNode.style.setProperty("--ry", `${ry}deg`);
       stageNode.style.setProperty("--gx", `${gx}%`);
       stageNode.style.setProperty("--gy", `${gy}%`);
+      // 信息行微视差：直接从插值后的指针位置反推（gx/gy ∈ 0~100），
+      // 沿鼠标反方向浮——不新增插值状态，跟扫光共用同一套收敛
+      stageNode.style.setProperty("--meta-x", `${-((gx - 50) / 50) * META_PARALLAX}px`);
+      stageNode.style.setProperty("--meta-y", `${-((gy - 50) / 50) * META_PARALLAX}px`);
     }
     const shotNode = shot;
     if (shotNode) {
@@ -423,6 +431,10 @@
     if (next > 1.001 !== (scale > 1.001)) {
       target.rx = 0;
       target.ry = 0;
+      // 扫光与信息行微视差也回正——放大态扫光本来就关了（不可见），
+      // 信息行则别停在半路偏移的位置上
+      target.gx = 50;
+      target.gy = 50;
     }
     // 位移上限 = 图片比框大出来的部分，两边各一半。还没铺满时框正好贴着图片，
     // 上限为 0 —— 整张都看得见，本来也没得拖。
@@ -784,6 +796,16 @@
         <div class="viewer__stack">
           <div class="viewer__scene">
             <div class="viewer__card">
+              <!-- 环境光：同一张原图糊开，氛围色跟着画走。filter 是分组属性，
+                   只能落在叶子节点上——套到 card 会压平整个 3D -->
+              <img
+                src={src}
+                alt=""
+                aria-hidden="true"
+                draggable="false"
+                class="viewer__ambient"
+              />
+
               <!-- 光锥底：背光场 -->
               <div class="viewer__halo"></div>
 
@@ -1055,11 +1077,30 @@
     will-change: transform;
   }
 
+  /* ---- 环境光：原图糊开 ----------------------------------------------
+     氛围色取自画本身而不是配色方案——每换一张图，光锥的环境色跟着走。
+     blur 是分组属性，只能待在叶子节点上；inset 外扩 + scale 是为了把
+     blur 在边缘吃出来的透明圈藏到卡片后面。
+     mask 是这道光的命门：糊开的原图仍是一张「矩形的鬼影」，不遮的话它
+     的边界（以及被窗口边缘 / 信息面板切断处）会显出一圈色彩断层——
+     椭圆遮罩让它贴着卡片后方保持满强度、往外一路溶成零，光晕在抵达
+     任何边界之前就化没了。mask 同样是分组属性，照样只能待在叶子上。 */
+  .viewer__ambient {
+    position: absolute;
+    inset: -8%;
+    object-fit: cover;
+    transform: translateZ(-64px) scale(1.2);
+    filter: blur(48px) saturate(1.25);
+    mask-image: radial-gradient(50% 50% at 50% 50%, #000 60%, transparent 96%);
+    -webkit-mask-image: radial-gradient(50% 50% at 50% 50%, #000 60%, transparent 96%);
+    pointer-events: none;
+  }
+
   /* ---- 光锥底 -------------------------------------------------------- */
   .viewer__halo {
     position: absolute;
     inset: -14%;
-    transform: translateZ(-64px);
+    transform: translateZ(-96px);
     border-radius: 50%;
     background: radial-gradient(
       circle at 50% 50%,
@@ -1192,6 +1233,9 @@
     width: 100%;
     /* 高度必须固定：`fit` 的可用高度里按这个常量扣掉了它 */
     height: 1.875rem;
+    /* 微视差：paint() 每帧写 --meta-x/y（沿鼠标反方向 ±6px）。只平移不旋转
+       —— 「meta 不进 3D」的约束不破，空间感照样有 */
+    translate: var(--meta-x, 0) var(--meta-y, 0);
     pointer-events: none;
   }
 
@@ -1381,9 +1425,14 @@
 
   /* ---- 特效总开关：关掉后变成朴素平面显示 ---------------------------- */
   .viewer.is-flat .viewer__halo,
+  .viewer.is-flat .viewer__ambient,
   .viewer.is-flat .viewer__glare,
   .viewer.is-flat .viewer__sheen {
     display: none;
+  }
+
+  .viewer.is-flat .viewer__meta {
+    translate: 0 0;
   }
 
   .viewer.is-flat .viewer__scene,
