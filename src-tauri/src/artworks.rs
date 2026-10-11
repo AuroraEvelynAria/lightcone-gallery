@@ -214,6 +214,12 @@ pub fn scan_media_rows(
     let mut duplicates = 0usize;
     let mut ignored = 0usize;
 
+    // 清掉首版桥带进来的坏路径行（相对路径 + 双斜杠——MediaStore 的
+    // RELATIVE_PATH 自带尾斜杠，首扫没拼存储根前缀）。它们不删的话，
+    // 修好的路径会被 ON CONFLICT DO NOTHING 挡在外面，缩略图永远修不回来。
+    // Android 绝对路径必以 / 开头，此清理只影响桥的存量，不碰桌面行。
+    conn.execute("DELETE FROM artworks WHERE original_path NOT LIKE '/%'", [])?;
+
     let skipped_pairs: HashSet<(String, i64)> = {
         let mut stmt = conn.prepare("SELECT pid, page FROM ignored_artworks")?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;

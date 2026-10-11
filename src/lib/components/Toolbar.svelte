@@ -17,6 +17,13 @@
     { value: "rating", label: "评分" },
   ];
 
+  let {
+    onnav,
+  }: {
+    /** 手机上的汉堡按钮回调（拉出侧栏抽屉）；桌面不渲染 */
+    onnav?: () => void;
+  } = $props();
+
   let searchInput = $state(gallery.search);
   let debounce: ReturnType<typeof setTimeout> | undefined;
 
@@ -39,7 +46,24 @@
   }
 </script>
 
-<header class="flex h-14 shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-4">
+<!-- 手机上工具条允许换行（min-h-14），桌面保持单行 h-14 -->
+<header
+  class="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-surface-800
+         bg-surface-900 px-4 md:h-14 md:flex-nowrap md:gap-3"
+>
+  <!-- 汉堡：手机上拉出侧栏抽屉 -->
+  {#if onnav}
+    <button
+      type="button"
+      class="cursor-pointer rounded-md p-1.5 text-muted transition hover:bg-surface-850 hover:text-fg md:hidden"
+      aria-label="打开导航"
+      onclick={onnav}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5m-16.5 5.25h16.5m-16.5 5.25h16.5" />
+      </svg>
+    </button>
+  {/if}
   <div class="min-w-0">
     <h1 class="truncate text-sm font-semibold text-fg">{gallery.selectionLabel}</h1>
     <p class="truncate text-[11px] text-muted">
@@ -51,9 +75,9 @@
     </p>
   </div>
 
-  <div class="flex-1"></div>
+  <div class="hidden flex-1 md:block"></div>
 
-  <label class="relative">
+  <label class="relative w-full min-w-0 md:w-auto">
     <svg
       viewBox="0 0 24 24"
       fill="none"
@@ -66,8 +90,8 @@
     <input
       type="search"
       placeholder="搜索文件名或路径…"
-      class="w-56 rounded-md border border-surface-700 bg-surface-850 py-1.5 pr-3 pl-8 text-sm
-             text-fg placeholder:text-muted outline-none focus:border-accent-500"
+      class="w-full rounded-md border border-surface-700 bg-surface-850 py-1.5 pr-3 pl-8 text-sm
+             text-fg placeholder:text-muted outline-none focus:border-accent-500 md:w-56"
       bind:value={searchInput}
       oninput={onSearchInput}
     />

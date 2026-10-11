@@ -3,6 +3,16 @@
   import { gallery, type Selection } from "$lib/gallery.svelte";
   import { formatBytes } from "$lib/format";
 
+  let {
+    open = true,
+    onclose,
+  }: {
+    /** 手机上抽屉是否拉出（md 以上常驻，此值无效果） */
+    open?: boolean;
+    /** 任一导航入口被点后回调（主界面收抽屉用） */
+    onclose?: () => void;
+  } = $props();
+
   let creating = $state<"album" | "tag" | null>(null);
   let draftName = $state("");
 
@@ -49,7 +59,11 @@
   }
 </script>
 
-<aside class="flex h-full w-64 shrink-0 flex-col border-r border-surface-800 bg-surface-900">
+<aside
+  class="fixed inset-y-0 left-0 z-40 flex h-full w-64 shrink-0 flex-col border-r border-surface-800
+         bg-surface-900 transition-transform duration-200 md:static md:translate-x-0
+         {open ? 'translate-x-0' : '-translate-x-full'}"
+>
   <div class="flex items-center gap-2 px-4 py-4">
     <div class="grid size-8 place-items-center rounded-lg bg-accent-500/15 text-accent-400">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="size-4.5">

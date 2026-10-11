@@ -10,11 +10,19 @@
   import type { Image } from "$lib/types";
 
   let opened = $state<Image | null>(null);
+  /** 手机上侧栏抽屉是否拉出（md 以上侧栏常驻，此值无效果） */
+  let navOpen = $state(false);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
   onMount(() => {
     void gallery.init();
     return () => void gallery.dispose();
+  });
+
+  // 换筛选维度后自动收起抽屉（手机上点完侧栏就该回到内容）
+  $effect(() => {
+    void gallery.selection;
+    navOpen = false;
   });
 
   // 操作结果提示 3 秒后自动消失
@@ -40,16 +48,25 @@
   }
 </script>
 
-<div class="flex h-screen w-screen overflow-hidden bg-surface-950">
-  <Sidebar />
+<div class="flex h-full w-full overflow-hidden bg-surface-950">
+  <!-- 手机抽屉的背幕 -->
+  {#if navOpen}
+    <div
+      class="fixed inset-0 z-30 bg-black/50 md:hidden"
+      aria-hidden="true"
+      onclick={() => (navOpen = false)}
+    ></div>
+  {/if}
+
+  <Sidebar open={navOpen} onclose={() => (navOpen = false)} />
 
   <div class="flex min-w-0 flex-1 flex-col">
     <!-- 作品库是侧栏里的一个原地切换视图（与全部图片 / 收藏同一套交互），
          不再是独立页面 —— 内容区整个交给 ArtworksView，含它自己的工具条 -->
     {#if gallery.selection.kind === "artworks"}
-      <ArtworksView />
+      <ArtworksView onnav={() => (navOpen = true)} />
     {:else}
-      <Toolbar />
+      <Toolbar onnav={() => (navOpen = true)} />
       <main class="min-h-0 flex-1 overflow-y-auto">
         <ImageGrid onopen={(image) => (opened = image)} />
       </main>

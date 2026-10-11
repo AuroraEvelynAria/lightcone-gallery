@@ -46,7 +46,7 @@
     class="absolute top-1.5 right-1.5 cursor-pointer rounded-full bg-black/55 p-1.5 backdrop-blur
            transition hover:bg-black/75 {image.isFavorite
              ? 'opacity-100'
-             : 'opacity-0 group-hover:opacity-100'}"
+             : 'opacity-0 group-hover:opacity-100 max-md:opacity-100'}"
     aria-label={image.isFavorite ? "取消收藏" : "加入收藏"}
     onclick={(event) => {
       event.stopPropagation();

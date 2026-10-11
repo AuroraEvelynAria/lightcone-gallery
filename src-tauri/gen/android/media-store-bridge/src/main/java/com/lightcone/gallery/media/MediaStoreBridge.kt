@@ -82,13 +82,13 @@ class MediaStoreBridge(private val activity: Activity) : Plugin(activity) {
       while (cursor.moveToNext()) {
         val name = cursor.getString(1) ?: continue
         val match = pixivName.find(name) ?: continue
-        val relativePath = cursor.getString(2) ?: ""
+        val relativePath = (cursor.getString(2) ?: "").trimEnd('/')
         val row = JSObject()
         row.put("id", cursor.getLong(0))
         row.put("name", name)
         // 真实文件路径：FUSE 会把带 READ_MEDIA_IMAGES 的应用放行到媒体文件
         // （Android 11+），Rust 侧的缩略图管线按路径读就行
-        row.put("path", "$relativePath/$name")
+        row.put("path", "/storage/emulated/0/$relativePath/$name")
         row.put("pid", match.groupValues[1])
         row.put("page", match.groupValues[2].toInt())
         row.put("size", cursor.getLong(3))

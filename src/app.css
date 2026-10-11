@@ -125,6 +125,10 @@
     margin: 0;
     /* surface-950 在材质生效时本身就是半透明的，所以铺在 body 上不会挡住材质 */
     @apply bg-surface-950 text-fg font-sans;
+    /* Android 全屏铺到状态栏/手势条底下（Tauri 安卓的 edge-to-edge）——
+       safe-area 让主布局避开系统 UI；桌面 env() 全是 0，无副作用 */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
     /* 桌面应用观感：禁止橡皮筋滚动与整页拖动选中 */
     overscroll-behavior: none;
     user-select: none;

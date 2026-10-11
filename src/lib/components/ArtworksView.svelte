@@ -29,6 +29,13 @@
     ThumbnailProgress,
   } from "$lib/types";
 
+  let {
+    /** 手机上的汉堡按钮回调（拉出侧栏抽屉） */
+    onnav,
+  }: {
+    onnav?: () => void;
+  } = $props();
+
   let scanning = $state(false);
   let summary = $state<ArtworkScanSummary | null>(null);
   let thumbProgress = $state<ThumbnailProgress | null>(null);
@@ -418,8 +425,24 @@
 </script>
 
 <div class="flex h-full min-h-0 flex-1 flex-col text-fg">
-  <!-- 与图库工具条同高同底色（h-14 / bg-surface-900 / px-4），观感上就是同一个壳 -->
-  <header class="flex h-14 shrink-0 items-center gap-3 border-b border-surface-800 bg-surface-900 px-4">
+  <!-- 与图库工具条同高同底色（h-14 / bg-surface-900 / px-4），观感上就是同一个壳；
+       手机上允许换行 -->
+  <header
+    class="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-surface-800
+           bg-surface-900 px-4 md:h-14 md:flex-nowrap md:gap-3"
+  >
+    {#if onnav}
+      <button
+        type="button"
+        class="cursor-pointer rounded-md p-1.5 text-muted transition hover:bg-surface-850 hover:text-fg md:hidden"
+        aria-label="打开导航"
+        onclick={onnav}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5m-16.5 5.25h16.5m-16.5 5.25h16.5" />
+        </svg>
+      </button>
+    {/if}
     <div class="min-w-0">
       <h1 class="truncate text-sm font-semibold text-fg">作品库（PID 维度）</h1>
       <p class="truncate text-[11px] tabular-nums text-muted">
@@ -431,7 +454,7 @@
       </p>
     </div>
 
-    <div class="flex-1"></div>
+    <div class="hidden flex-1 md:block"></div>
 
     {#if artworks.total > 0}
       <button

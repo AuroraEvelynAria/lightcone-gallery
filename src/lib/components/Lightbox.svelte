@@ -38,6 +38,8 @@
   let illust = $state<IllustDetailView | null>(null);
   /** 全屏时把面板收起来。由 ImageViewer 通知。 */
   let immersive = $state(false);
+  /** 手机上右侧信息面板的开关（桌面常驻，此值无效果） */
+  let panelOpen = $state(false);
 
   // 切换图片时重新拉取详情（标签 / 相册归属）与 Pixiv 侧信息
   $effect(() => {
@@ -125,6 +127,20 @@
         文件名（`148607673_p0.png`）对「这是谁的画、画的是什么」毫无帮助。
         画师名做成按钮，点一下就只看这位画师的作品。
       -->
+      {#snippet actions()}
+        <!-- 手机上没有常驻面板：ℹ️ 开关信息浮层（桌面面板常驻，不渲染） -->
+        <button
+          type="button"
+          class="cursor-pointer rounded-md p-1.5 text-soft transition hover:text-fg md:hidden"
+          aria-label="信息面板"
+          onclick={() => (panelOpen = !panelOpen)}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12v-.008z" />
+          </svg>
+        </button>
+      {/snippet}
+
       {#snippet meta()}
         {#if illust}
           <!-- 收成局部常量：`illust` 是 $state，闭包里读不到外层的收窄 -->
@@ -165,7 +181,12 @@
 
   {#if !immersive}
     <!-- 信息面板 -->
-    <div class="flex w-80 shrink-0 flex-col border-l border-surface-800 bg-surface-900">
+    <!-- 手机：面板默认收起，ℹ️ 按钮开关，从右侧浮出；桌面：常驻右栏 -->
+    <div
+      class="absolute inset-y-0 right-0 z-20 flex w-[88%] max-w-80 shrink-0 flex-col border-l
+             border-surface-800 bg-surface-900 shadow-2xl {panelOpen ? '' : 'hidden'}
+             md:static md:z-auto md:w-80 md:max-w-none md:shadow-none"
+    >
       <div class="border-b border-surface-800 p-4">
         <p class="truncate text-sm font-semibold text-fg" data-selectable>{image.filename}</p>
         <p class="text-[11px] text-muted">
