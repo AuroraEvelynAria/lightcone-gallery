@@ -26,6 +26,22 @@ pub fn run() {
         // 剪贴板插件：只用它的 Rust API（`app.clipboard().write_image`），
         // 走的是进程内调用、不经过 IPC，所以不需要在 capabilities 里放行它的命令。
         .plugin(tauri_plugin_clipboard_manager::init())
+        // MediaStore 桥只在 Android 存在：注册后把手柄交给托管状态，
+        // `android_scan_media_store` 命令通过它调 Kotlin（见 commands/media.rs）
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, serde_json::Value>::new("media-store-bridge")
+                .setup(|_app, _api| {
+                    #[cfg(target_os = "android")]
+                    {
+                        use commands::media::MediaBridge;
+                        let handle = _api
+                            .register_android_plugin("com.lightcone.gallery.media", "MediaStoreBridge")?;
+                        _app.manage(MediaBridge::new(handle));
+                    }
+                    Ok(())
+                })
+                .build(),
+        )
         .setup(|app| {
             // AppHandle 是 clone 成本极低的句柄，先取出来避免与 app.manage 的可变借用冲突
             let handle = app.handle().clone();
@@ -99,6 +115,10 @@ pub fn run() {
             // 阶段一：作品（Pixiv）维度
             commands::scan_artworks_folder,
             commands::list_artworks,
+            // Android：MediaStore 桥（pixez 下图、本应用索引）
+            commands::android_scan_media_store,
+            commands::android_check_media_permission,
+            commands::android_request_media_permission,
             // 阶段二：作品缩略图（有损 WebP）+ 前端虚拟滚动
             commands::thumbnail_for_artwork,
             // 阶段四：把作品移出作品库（不动原图）

@@ -109,6 +109,12 @@ export const api = {
   scanArtworksFolder: (path: string) =>
     invoke<ArtworkScanSummary>("scan_artworks_folder", { path }),
   /**
+   * Android：MediaStore 桥扫描。pixez 下到哪索引到哪——桥枚举全机图片里
+   * 符合 `{pid}_p{n}` 命名的条目入库并生成缩略图，不需要选目录。
+   */
+  androidScanMediaStore: () =>
+    invoke<ArtworkScanSummary>("android_scan_media_store"),
+  /**
    * 分页读取作品列表：从第 offset 条开始返回 limit 条。
    *
    * 每条都带着 `originalPath` 与 `thumbnailPath`，卡片直接用后者渲染，无需额外 IPC。

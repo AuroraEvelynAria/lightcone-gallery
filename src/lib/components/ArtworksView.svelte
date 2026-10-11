@@ -160,8 +160,16 @@
     };
   });
 
+  /** 是否运行在 Android 上——扫描入口在手机上是 MediaStore 桥，没有目录选择 */
+  const isAndroid = navigator.userAgent.includes("Android");
+
   /** 选择文件夹 -> 扫描入库 + 批量生成缩略图 -> 作废旧块重新拉取。 */
   async function pickAndScan(): Promise<void> {
+    // 安卓上没有「选目录」这回事：pixez 下到哪，MediaStore 桥索引到哪
+    if (isAndroid) {
+      await scanFromMediaStore();
+      return;
+    }
     const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({
       directory: true,
@@ -175,6 +183,23 @@
     try {
       summary = await api.scanArtworksFolder(picked);
       // 库里多了行，之前缓存的块偏移量全部作废
+      artworks.reset();
+      await artworks.bootstrap();
+      await refreshIgnored();
+    } catch (err) {
+      artworks.error = String(err);
+    } finally {
+      scanning = false;
+      thumbProgress = null;
+    }
+  }
+
+  /** 安卓扫描：MediaStore 枚举全机图片，按 `{pid}_p{n}` 命名入库。 */
+  async function scanFromMediaStore(): Promise<void> {
+    scanning = true;
+    thumbProgress = null;
+    try {
+      summary = await api.androidScanMediaStore();
       artworks.reset();
       await artworks.bootstrap();
       await refreshIgnored();
@@ -461,7 +486,7 @@
           扫描中…
         {/if}
       {:else}
-        选择文件夹并扫描
+        {isAndroid ? "扫描手机里的 pixez 图" : "选择文件夹并扫描"}
       {/if}
     </button>
   </header>
@@ -737,9 +762,15 @@
       <div class="flex flex-col items-center justify-center gap-2 py-24 text-center">
         <p class="text-sm text-muted">作品库还是空的。</p>
         <p class="text-xs text-muted">
-          点上方「选择文件夹并扫描」，选一个含有 <code class="text-muted"
-            >{'{pid}_p{num}.jpg'}</code
-          > 文件的目录。
+          {#if isAndroid}
+            点上方「扫描手机里的 pixez 图」，全机符合
+            <code class="text-muted">{'{pid}_p{num}.jpg'}</code> 命名的图片
+            会自动入库。
+          {:else}
+            点上方「选择文件夹并扫描」，选一个含有 <code class="text-muted"
+              >{'{pid}_p{num}.jpg'}</code
+            > 文件的目录。
+          {/if}
         </p>
       </div>
     {:else}

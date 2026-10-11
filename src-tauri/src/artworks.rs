@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 use walkdir::WalkDir;
 
 use crate::db::models::{ArtworkScanSummary, ThumbnailBatch};
@@ -144,6 +145,120 @@ pub fn scan_folder(conn: &mut Connection, root: &Path) -> AppResult<ArtworkScanS
         inserted,
         duplicates,
         skipped: discovered - matched_count,
+        ignored,
+        thumbnails_generated: 0,
+        thumbnails_skipped: 0,
+        thumbnails_failed: 0,
+    })
+}
+
+/// Android：MediaStore 桥回传的一张图。Kotlin 侧已按 `{pid}_p{n}.{ext}`
+/// 正则过滤并解析好 pid / page，Rust 侧不再重复解析。
+///
+/// `path` 是真实文件路径（`relative_path + display_name`）。Android 11+ 的
+/// FUSE 会放行持有 `READ_MEDIA_IMAGES` 的应用按路径读媒体文件，缩略图管线
+/// 照桌面一样按路径读就行；个别设备策略不一致时，Kotlin 桥的 `copyToCache`
+/// 是兜底（拷进应用 cache 再走老管线）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+// 只在 Android 分支（android_scan_media_store）被消费
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub struct MediaImageRow {
+    /// MediaStore 的 `_id`。走 `copyToCache` 兜底时用它拼 content URI。
+    #[allow(dead_code)]
+    pub id: i64,
+    #[allow(dead_code)]
+    pub name: String,
+    pub pid: String,
+    pub page: i64,
+    pub path: String,
+    #[allow(dead_code)]
+    pub size: i64,
+    #[allow(dead_code)]
+    pub modified: i64,
+    #[allow(dead_code)]
+    pub width: i64,
+    #[allow(dead_code)]
+    pub height: i64,
+}
+
+/// Android 入库：与 [`scan_folder`] 完全同一套语义——忽略名单、`UNIQUE(pid, page)`
+/// 去重计数、画师从路径反推、根目录落盘——只是行来自 MediaStore 桥而不是 walkdir。
+///
+/// 根目录按每行的父目录去重登记（pixez 的目录结构是 `<画师名>_<uid>/<pid>_p<n>`，
+/// 路径反推画师的规则照常生效）；asset:// 的**运行时**授权在命令层做。
+/// `discovered` / `skipped` 与桌面语义对齐：Kotlin 侧已按命名过滤，进来的行
+/// 全部视为「命名匹配」。
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub fn scan_media_rows(
+    conn: &mut Connection,
+    rows: &[MediaImageRow],
+) -> AppResult<ArtworkScanSummary> {
+    let now = now_unix();
+    let mut roots: HashSet<String> = HashSet::new();
+    let mut matched: Vec<(String, i64, String, Option<(String, String)>)> = Vec::new();
+
+    for row in rows {
+        matched.push((
+            row.pid.clone(),
+            row.page,
+            row.path.clone(),
+            crate::artists::parse_artist(&row.path),
+        ));
+        if let Some(parent) = Path::new(&row.path).parent() {
+            roots.insert(parent.to_string_lossy().into_owned());
+        }
+    }
+
+    let mut inserted = 0usize;
+    let mut duplicates = 0usize;
+    let mut ignored = 0usize;
+
+    let skipped_pairs: HashSet<(String, i64)> = {
+        let mut stmt = conn.prepare("SELECT pid, page FROM ignored_artworks")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>()?
+    };
+
+    let tx = conn.transaction()?;
+    {
+        // 与 scan_folder 同一条 INSERT：thumbnail_path 先留空，等 generate_thumbnails 回填
+        let mut stmt = tx.prepare(
+            "INSERT INTO artworks (pid, original_path, page, created_at, artist_uid)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(pid, page) DO NOTHING",
+        )?;
+        for (pid, page, original_path, artist) in &matched {
+            if skipped_pairs.contains(&(pid.clone(), *page)) {
+                ignored += 1;
+                continue;
+            }
+            crate::artists::remember_artist(&tx, artist, now)?;
+            let artist_uid = artist.as_ref().map(|(uid, _)| uid.as_str());
+            if stmt.execute(params![pid, original_path, page, now, artist_uid])? > 0 {
+                inserted += 1;
+            } else {
+                duplicates += 1;
+            }
+        }
+
+        for root in &roots {
+            tx.execute(
+                "INSERT INTO artwork_roots (path, created_at) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO NOTHING",
+                params![root, now],
+            )?;
+        }
+    }
+    tx.commit()?;
+
+    let matched_count = matched.len();
+    Ok(ArtworkScanSummary {
+        discovered: rows.len(),
+        matched: matched_count,
+        inserted,
+        duplicates,
+        skipped: rows.len() - matched_count,
         ignored,
         thumbnails_generated: 0,
         thumbnails_skipped: 0,

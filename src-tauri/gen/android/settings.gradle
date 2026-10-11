@@ -1,3 +1,4 @@
 include ':app'
+include ':media-store-bridge'
 
 apply from: 'tauri.settings.gradle'
