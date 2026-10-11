@@ -103,9 +103,9 @@ npm run tauri:build
 
 ## 二、Android
 
-### 1. 为什么不是「换条命令」
+### 1. 移动端的定位：pixez 是采集层，本应用是索引层
 
-这个应用的每一条数据通路都建立在**文件系统路径**上：
+这个应用的每一条桌面数据通路都建立在**文件系统路径**上：
 
 ```
 选目录 → walkdir 递归 → std::fs 读元数据 / 读图片字节
@@ -113,43 +113,38 @@ npm run tauri:build
        → 原图用 asset:// 协议交给 WebView
 ```
 
-Android 上这套有三处硬碰：
+Android 上这套有三处硬碰，但主人的定位把它全绕开了：**手机上 pixez 负责下图，
+本应用只负责整理与归类**——「只要 pixez 能下图，数据库就是无限大」。于是：
 
-1. **分区存储**（Android 10 / API 29 起）：应用默认读不到 `/storage/emulated/0/...`。
-   要么申请 `MANAGE_EXTERNAL_STORAGE`（「所有文件访问」），要么走 SAF。
-2. **`tauri-plugin-dialog` 在 Android 上没有目录选择**。已核实：Rust 侧的
-   `src/mobile.rs` 只有 `pick_file` / `pick_files` / `save_file` / `show_message_dialog`，
-   Kotlin 侧只有 `showFilePicker` / `showMessageDialog` / `saveFileDialog`（走
-   `ACTION_OPEN_DOCUMENT`）。所以 `open({ directory: true })` 这个入口在 Android 上
-   **不存在**，而且它的文件选择返回的是 `content://` URI，不是路径。
-3. **`asset://` 服务不了 `content://`**。原图显示这一环必须换方案。
+1. **不需要「选目录」**。pixez 落盘命名是 `{pid}_p{n}.{ext}`，而作品库的归档
+   本来就是文件名驱动的——枚举全机图片、按文件名正则一过，是 pixez 下的
+   就自动进库。目录选择、SAF 树、授权持久化统统不需要
+   （`tauri-plugin-dialog` 在 Android 上没有目录选择、返回的是 `content://`
+   URI 而非路径——已核实 `src/mobile.rs` 只有 `pick_file` / `pick_files` /
+   `save_file` / `show_message_dialog`——但这不再是障碍，因为入口不存在了）。
+2. **枚举全机图片有正规通道：MediaStore**。`READ_MEDIA_IMAGES` 是普通运行时
+   权限（Play 友好），查询自带文件名、尺寸、大小、修改时间——连图片头都不用
+   读，索引一万张几乎零成本。Kotlin 桥做三件事：查询 MediaStore、按命名
+   正则过滤、把命中行的 `_id / display_name / relative_path / size /
+   date_modified / width / height` 分批回给 Rust。
+3. **像素读取走「Kotlin 拷临时文件」桥**：缩略图生成时把源图拷进应用 cache
+   目录，Rust 现有管线（解码 → WebP → 落盘）原样复用；弹窗原图同理按需拷贝
+   ——cache 目录本来就在 asset:// 的授权清单里，原图显示这一环也接上了。
 
-所以 Android 不是「适配」，是一次**文件访问层的重写**。两条路线：
+所以要改的只有：**一个 Kotlin 桥插件 + `artworks` 扫描入口的分叉（桌面走
+walkdir，Android 走 MediaStore 桥）**。SQLite、虚拟滚动、分块缓存、缩略图
+队列、检视弹窗全部原样。
 
-#### 路线 A：侧载分发（改动小，推荐先走这条）
+> 顺带：联网补全在手机上有意外的好消息——国内安卓普遍用 VPN 模式代理
+> （TUN 在 IP 层带走流量），`reqwest` 直连就能通，代理输入框可以降级成「可选」。
 
-不追求上 Google Play，直接发 APK。申请 `MANAGE_EXTERNAL_STORAGE` +
-`READ_MEDIA_IMAGES`，保留现有的路径式代码（walkdir / `std::fs` / `asset://` 全不动），
-只把「选目录」换成：
+#### 备选路线（按需）
 
-- 一个 Kotlin 小插件调 `ACTION_OPEN_DOCUMENT_TREE`，拿树 URI 后用
-  `DocumentsContract` 转成真实路径（或直接记住 URI 再逐段映射）；
-- 或者更省事：不选目录，只认一个固定根（如 `/storage/emulated/0/Pictures`）+
-  一个可手填的路径输入框。
-
-注意 Play 对 `MANAGE_EXTERNAL_STORAGE` 的审核很严（只放给文件管理 / 备份类应用），
-所以这条路和「上架 Play」基本互斥。
-
-#### 路线 B：上架 Google Play（工作量大）
-
-走 SAF：`ACTION_OPEN_DOCUMENT_TREE` 拿到树 URI，之后一切读取都经
-`ContentResolver` / `DocumentFile`。要改的地方：
-
-- `scanner.rs` 与 `artworks.rs`：目录遍历从 `walkdir` 改成 `DocumentFile.listFiles()`；
-- `thumbnails.rs`：输入从「文件路径」改成「输入流」（`image` crate 支持从 `Read` 解码，
-  这一层改动可控）；
-- 原图显示：`asset://` 换成自定义协议处理器，从 URI 读字节再回给 WebView；
-- 权限持久化：SAF 授权要 `takePersistableUriPermission`，否则重启后失效。
+- **侧载 + `MANAGE_EXTERNAL_STORAGE`**：保留全部路径式代码（walkdir / `std::fs`
+  / `asset://` 直读），只把「选目录」换成固定根 + 手填路径。改动最小，但该权限
+  上 Play 审核基本过不了，且比 MediaStore 方案没有额外好处——弃为备选。
+- **SAF 全重写**：树 URI + `ContentResolver` 全链路。为「任选任意目录」这种
+  本应用不需要的能力付出最大代价——弃为备选。
 
 ### 2. 装工具链（本机全缺）
 

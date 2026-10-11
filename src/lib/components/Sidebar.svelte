@@ -276,11 +276,24 @@
 
   /* 侧栏内部复用的几个组合类，写成 @apply 避免在模板里堆一长串工具类 */
   .sidebar-item {
-    @apply flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5
+    @apply relative flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5
            text-left text-sm text-muted transition hover:bg-surface-850 hover:text-fg;
   }
   .sidebar-item-active {
     @apply bg-accent-500/15 text-accent-400 hover:bg-accent-500/20 hover:text-accent-400;
+  }
+  /* 光锥线：选中项左侧的一道竖向强调光。整个应用名字里「LightCone」
+     唯一的具象化——比加高亮底色更省、更点题 */
+  .sidebar-item-active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 22%;
+    bottom: 22%;
+    width: 2px;
+    border-radius: 9999px;
+    background: var(--tone-accent);
+    box-shadow: 0 0 8px color-mix(in oklab, var(--tone-accent) 60%, transparent);
   }
   .count {
     @apply shrink-0 text-[11px] tabular-nums text-muted;

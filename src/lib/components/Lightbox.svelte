@@ -242,7 +242,7 @@
               {#each illust.tags as tag (tag)}
                 <button
                   type="button"
-                  class="tag-chip cursor-pointer transition hover:border-accent-500 hover:text-accent-400"
+                  class="tag-chip cursor-pointer transition hover:bg-accent-500/10 hover:text-accent-400"
                   title="只看带「{tag}」的作品"
                   onclick={() => onfiltertag?.(tag)}
                 >
@@ -327,7 +327,7 @@
         <!-- 文件信息 -->
         <section>
           <h3 class="panel-head">文件信息</h3>
-          <dl class="space-y-1.5 text-xs">
+          <dl class="space-y-1.5 font-mono text-xs tabular-nums">
             <div class="flex justify-between gap-3">
               <dt class="text-muted">尺寸</dt>
               <dd class="text-right text-soft">{formatDimensions(image.width, image.height)}</dd>
@@ -345,7 +345,7 @@
               <dd class="text-right text-soft">{formatDate(image.indexedAt)}</dd>
             </div>
           </dl>
-          <p class="mt-2 rounded-md bg-surface-850 p-2 text-[11px] break-all text-muted" data-selectable>
+          <p class="mt-2 rounded-md bg-surface-850 p-2 font-mono text-[11px] break-all text-muted" data-selectable>
             {image.path}
           </p>
         </section>
@@ -370,7 +370,8 @@
     @apply mb-2 text-[11px] font-semibold tracking-wide text-muted uppercase;
   }
   .tag-chip {
-    @apply inline-flex items-center gap-1 rounded-full border border-surface-700 px-2 py-0.5
+    /* 无边框胶囊：半透明底贴毛玻璃面板，hover 用底色而不是描边呼应 */
+    @apply inline-flex items-center gap-1 rounded-full bg-surface-850/80 px-2.5 py-0.5
            text-xs text-soft;
   }
 </style>
