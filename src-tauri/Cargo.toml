@@ -43,6 +43,13 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "d
 tokio = { version = "1.53.2", default-features = false, features = ["time"] }
 tauri-plugin-clipboard-manager = "2.4.1"
 
+# Android：reqwest 0.13 的 TLS 用 rustls-platform-verifier，它在 Android 上
+# 需要 JNI 初始化（不初始化的话每次 HTTPS 连接 panic，元数据请求全部静默挂死）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22"
+ndk-context = "0.1"
+rustls-platform-verifier = "0.7"
+
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]
 codegen-units = 1

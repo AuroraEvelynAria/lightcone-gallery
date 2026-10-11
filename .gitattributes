@@ -1,0 +1,4 @@
+# 本地 maven 仓库里的构件按字节原样存取。
+# 原因：core.autocrlf=true 的机器上，pom 会在检出时被换成 CRLF，
+# 于是它和旁边的 .sha1 对不上（Gradle 校验时就会报构件损坏）。
+src-tauri/gen/android/local-maven/** -text

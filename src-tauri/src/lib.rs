@@ -43,6 +43,23 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Android：初始化 rustls-platform-verifier —— reqwest 0.13 的默认 TLS
+            // 在 Android 上靠它拿系统证书，而它的初始化要 JNI 环境（官方要求应用
+            // 启动时手动调）。漏掉的话每次 HTTPS 连接直接 panic
+            // 「Expect rustls-platform-verifier to be initialized」，任务悄悄死掉。
+            #[cfg(target_os = "android")]
+            {
+                use jni::objects::JObject;
+                let ctx = ndk_context::android_context();
+                let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) };
+                vm.attach_current_thread(|env| {
+                    let context =
+                        unsafe { JObject::from_raw(env, ctx.context().cast()) };
+                    rustls_platform_verifier::android::init_with_env(env, context)
+                })
+                .map_err(|err| format!("TLS verifier 初始化失败: {err}"))?;
+            }
+
             // AppHandle 是 clone 成本极低的句柄，先取出来避免与 app.manage 的可变借用冲突
             let handle = app.handle().clone();
 
@@ -119,6 +136,11 @@ pub fn run() {
             commands::android_scan_media_store,
             commands::android_check_media_permission,
             commands::android_request_media_permission,
+            commands::android_immersive,
+            commands::android_pick_directory,
+            commands::android_list_subdirs,
+            commands::android_keep_alive,
+            commands::android_restore_db,
             // 阶段二：作品缩略图（有损 WebP）+ 前端虚拟滚动
             commands::thumbnail_for_artwork,
             // 阶段四：把作品移出作品库（不动原图）
@@ -135,6 +157,8 @@ pub fn run() {
             commands::fetch_all_meta,
             commands::stop_meta_fetch,
             commands::copy_image_to_clipboard,
+            // Android：返回手势的最后一站（MainActivity 转发、前端关闭栈走完才调）
+            commands::exit_app,
         ])        .build(tauri::generate_context!())
         .expect("error while building tauri application");
 

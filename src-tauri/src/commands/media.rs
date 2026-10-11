@@ -109,6 +109,205 @@ pub async fn android_request_media_permission(app: AppHandle) -> AppResult<Permi
     }
 }
 
+/// Android 沉浸式全屏：隐藏 / 恢复状态栏与手势条。
+/// 检视弹窗的全屏按钮在手机上走这里 —— wry 对 HTML Fullscreen 是空壳、
+/// Tauri 的窗口 API 在移动端也是空架子，只有 insets controller 真的能
+/// 把系统栏收起来。桌面端不需要，直接返回。
+#[tauri::command]
+pub async fn android_immersive(app: AppHandle, enabled: bool) -> AppResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<MediaBridge>();
+        let handle = bridge.handle.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            handle
+                .run_mobile_plugin::<serde_json::Value>(
+                    "immersive",
+                    serde_json::json!({ "enabled": enabled }),
+                )
+                .map(|_| ())
+                .map_err(|err| AppError::Other(format!("Kotlin 桥调用失败: {err}")))
+        })
+        .await
+        .map_err(|err| AppError::Other(format!("桥任务失败: {err}")))?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// 选目录面板的一层列表：某目录下的子目录（附各自直属图片数）与直属图片数。
+///
+/// **实时 readdir 文件系统**而不是查 MediaStore —— 后者的索引滞后且波动
+/// （实测同一命令不同时刻分别返回 1518 条和 22 条），选目录必须反映真实
+/// 文件系统。readdir 公共目录在持有 `READ_MEDIA_IMAGES` 时被 FUSE 放行，
+/// 与扫描管线按路径读文件同一通道。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubdirEntry {
+    pub name: String,
+    pub image_count: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirListing {
+    pub subdirs: Vec<SubdirEntry>,
+    pub direct_images: i64,
+}
+
+fn is_image_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// 数某目录直属的图片文件数（只读一层目录项，不碰文件内容）。
+fn count_direct_images(dir: &std::path::Path) -> i64 {
+    let mut count = 0i64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && is_image_file(&entry.file_name().to_string_lossy())
+            {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// 列出一个目录的子目录（带各自直属图片数）与它直属的图片数。
+#[tauri::command]
+pub async fn android_list_subdirs(path: String) -> AppResult<DirListing> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = std::path::Path::new(&path);
+        let mut subdirs = Vec::new();
+        let mut direct_images = 0i64;
+        let entries = std::fs::read_dir(root)
+            .map_err(|err| AppError::InvalidPath(format!("目录读不了 {path}: {err}")))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| AppError::Other(format!("读取目录项失败: {err}")))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let image_count = count_direct_images(&entry.path());
+                subdirs.push(SubdirEntry { name, image_count });
+            } else if is_image_file(&name) {
+                direct_images += 1;
+            }
+        }
+        subdirs.sort_by(|a, b| {
+            b.image_count
+                .cmp(&a.image_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        Ok(DirListing {
+            subdirs,
+            direct_images,
+        })
+    })
+    .await
+    .map_err(|err| AppError::Other(format!("{err}")))?
+}
+
+/// SAF 目录选择结果（Kotlin 侧 resolve 的 JSObject）。
+#[cfg(target_os = "android")]
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedDirectory {
+    /// 选中的物理路径；主人取消 / 不支持的位置为空串
+    #[serde(default)]
+    pub path: String,
+}
+
+/// Android：弹出系统目录选择器（SAF），返回选中的**物理路径**。
+///
+/// 主人取消或选了暂不支持的位置（外置存储卡）时返回空串，前端据此静默返回。
+/// 拿到路径后与桌面完全同一条管线：`add_library` 登记 → walkdir 扫描。
+#[tauri::command]
+pub async fn android_pick_directory(app: AppHandle) -> AppResult<String> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<MediaBridge>();
+        let handle = bridge.handle.clone();
+        // SAF 选择器要等主人点完系统 UI —— 阻塞线程池是家规（见 call_bridge）
+        tauri::async_runtime::spawn_blocking(move || {
+            let picked: PickedDirectory = handle
+                .run_mobile_plugin("pickDirectory", serde_json::Value::Null)
+                .map_err(|err| AppError::Other(format!("Kotlin 桥调用失败: {err}")))?;
+            Ok(picked.path)
+        })
+        .await
+        .map_err(|err| AppError::Other(format!("桥任务失败: {err}")))?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err(AppError::Other("仅 Android 支持此命令".to_string()))
+    }
+}
+
+/// Android：元数据补全的前台服务开关（通知栏常驻，豁免后台断网策略）。
+#[tauri::command]
+pub async fn android_keep_alive(app: AppHandle, enabled: bool) -> AppResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        let bridge = app.state::<MediaBridge>();
+        let handle = bridge.handle.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            handle
+                .run_mobile_plugin::<serde_json::Value>(
+                    "keepAlive",
+                    serde_json::json!({ "enabled": enabled }),
+                )
+                .map(|_| ())
+                .map_err(|err| AppError::Other(format!("Kotlin 桥调用失败: {err}")))
+        })
+        .await
+        .map_err(|err| AppError::Other(format!("桥任务失败: {err}")))?
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, enabled);
+        Ok(())
+    }
+}
+
+/// Android 应急恢复：把外部文件（如 /sdcard/Download 里 push 进来的数据库
+/// 备份）覆盖到应用的数据目录。run-as 的 FUSE 会话读不了 /sdcard（实测
+/// Permission denied），但应用自己的进程读媒体文件没问题 —— 所以用「伪装
+/// 成 .jpg 推入 + 应用自己拷回」的组合。覆盖后需要重启应用生效。
+#[tauri::command]
+pub async fn android_restore_db(app: AppHandle, external: String) -> AppResult<String> {
+    #[cfg(target_os = "android")]
+    {
+        use std::path::PathBuf;
+        let external = PathBuf::from(&external);
+        let size = std::fs::metadata(&external)
+            .map_err(|err| AppError::InvalidPath(format!("外部文件读不了 {external:?}: {err}")))?
+            .len();
+        let data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|err| AppError::Other(format!("数据目录定位失败: {err}")))?;
+        let target = data_dir.join("gallery.db");
+        std::fs::copy(&external, &target)
+            .map_err(|err| AppError::Other(format!("拷贝失败: {err}")))?;
+        // 旧的 WAL/SHM 是上一个数据库的残留，留着会污染刚恢复的主文件
+        let _ = std::fs::remove_file(data_dir.join("gallery.db-wal"));
+        let _ = std::fs::remove_file(data_dir.join("gallery.db-shm"));
+        Ok(format!("已恢复 {size} 字节，请重启应用生效"))
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, external);
+        Err(AppError::Other("仅 Android 支持".to_string()))
+    }
+}
+
 /// Android 扫描：MediaStore 枚举 → 授权根目录 → 入库 → 批量缩略图。
 ///
 /// 桌面流程是「选目录 → walkdir」；手机上这一步不存在——pixez 下到哪

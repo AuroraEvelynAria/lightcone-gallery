@@ -28,5 +28,7 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.9.0")
+    // SAF 目录选择器的回调类型（ActivityResult）在这个库里
+    implementation("androidx.activity:activity-ktx:1.9.3")
     implementation(project(":tauri-android"))
 }

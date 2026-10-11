@@ -191,3 +191,11 @@ pub async fn copy_image_to_clipboard(app: AppHandle, path: String) -> AppResult<
         .map_err(|err| AppError::Other(format!("写入剪贴板失败: {err}")))?;
     Ok(())
 }
+
+/// Android 全面屏返回手势的最后一站：MainActivity 把系统返回转发给前端，
+/// 前端的「关闭栈」（弹窗 → 抽屉 → …）都空了才调这里退出应用。
+/// `app.exit` 会走 `RunEvent::Exit`，lib.rs 里的 WAL checkpoint 照常执行。
+#[tauri::command]
+pub fn exit_app(app: AppHandle) {
+    app.exit(0);
+}

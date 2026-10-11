@@ -2063,8 +2063,11 @@ name = "lightcone-gallery"
 version = "0.2.0"
 dependencies = [
  "image",
+ "jni 0.22.4",
+ "ndk-context",
  "reqwest",
  "rusqlite",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "tauri",
