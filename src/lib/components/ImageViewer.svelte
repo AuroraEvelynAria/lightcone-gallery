@@ -128,6 +128,12 @@
   const MAX_TILT = 7;
   /** 信息行微视差幅度（px）。沿鼠标反方向浮，要空间感但不动摇可读性。 */
   const META_PARALLAX = 6;
+  /**
+   * 重力感应的行程：偏离中性握持角 ±RANGE 度即满倾斜。
+   * 首次读到传感器数据时把当时的姿态记为中性——人不会把手机举得端端正正，
+   * 自动校准比要求「握正」现实；回到前台时重新校准（握持姿势多半变了）。
+   */
+  const GYRO_RANGE = 20;
   /** 每帧向目标插值的比例，≈140ms 时间常数。 */
   const EASE = 0.12;
   /** 收敛阈值，低于它就停掉 rAF。 */
@@ -252,6 +258,20 @@
       window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
 
+  /**
+   * 粗指针设备（手机 / 平板）：没有 hover，光锥的驱动源从鼠标换成重力感应。
+   * 触摸拖拽不再参与倾斜（会和陀螺仪打架），只保留放大后的单指平移。
+   */
+  const touchPrimary = $derived(
+    typeof window !== "undefined" &&
+      window.matchMedia("(hover: none) and (pointer: coarse)").matches,
+  );
+
+  // 重力感应的中性握持角（非响应式：只在传感器事件里读写）
+  let gyroBeta0 = 0;
+  let gyroGamma0 = 0;
+  let gyroCalibrated = false;
+
   // ---------------------------------------------------------------------------
   // 光锥视差
   // ---------------------------------------------------------------------------
@@ -265,9 +285,9 @@
       return;
     }
 
-    // 放大之后鼠标负责平移，再叠倾斜就晕了；特效关掉时也完全不动
+    // 放大之后指针负责平移；粗指针设备的倾斜归重力感应管（两者不打架）
     const node = frame;
-    if (!node || calm || zoomed || !effectsEnabled) return;
+    if (!node || calm || zoomed || !effectsEnabled || touchPrimary) return;
 
     const rect = node.getBoundingClientRect();
     const px = ((event.clientX - rect.left) / rect.width) * 100;
@@ -287,6 +307,15 @@
     target.gx = 50;
     target.gy = 50;
     start();
+  }
+
+  /**
+   * 指针离场归位。触屏上跳过：手指抬起就是 pointerleave，而陀螺仪马上会
+   * 接管姿态——这里的归位只会和它打架；桌面鼠标离场才需要归位。
+   */
+  function onpointerleave(event: PointerEvent): void {
+    if (touchPrimary) return;
+    if (!dragging) resetTilt();
   }
 
   function start(): void {
@@ -744,15 +773,56 @@
 
     // 窗口切到后台时别再算，切回来先把姿态归零
     const onvisibility = () => {
-      if (document.visibilityState === "visible") resetTilt();
+      if (document.visibilityState === "visible") {
+        // 回到前台重新校准中性角（握持姿势多半变了），姿态归零
+        gyroCalibrated = false;
+        resetTilt();
+      }
     };
 
     window.addEventListener("keydown", onkeydown);
     document.addEventListener("visibilitychange", onvisibility);
 
+    // 粗指针设备：重力感应接管光锥——卡片随手机倾斜（刚体感），
+    // 高光当固定环境光反向移。轴随屏幕旋转交换；中性角自动校准。
+    // Android WebView 无需 iOS 那套 requestPermission，直接监听即可。
+    let gyroHandler: ((event: DeviceOrientationEvent) => void) | null = null;
+    if (touchPrimary && !calm) {
+      gyroHandler = (event: DeviceOrientationEvent): void => {
+        if (event.beta === null || event.gamma === null) return;
+        if (zoomed || !effectsEnabled) return;
+        if (!gyroCalibrated) {
+          gyroBeta0 = event.beta;
+          gyroGamma0 = event.gamma;
+          gyroCalibrated = true;
+        }
+        // 屏幕旋转时 beta/gamma 的轴含义互换——按 screen.orientation.angle 重映射
+        const angle = screen.orientation?.angle ?? 0;
+        let beta = event.beta;
+        let gamma = event.gamma;
+        if (angle === 90) {
+          [beta, gamma] = [-gamma, beta];
+        } else if (angle === 270 || angle === -90) {
+          [beta, gamma] = [gamma, -beta];
+        } else if (angle === 180) {
+          [beta, gamma] = [-beta, -gamma];
+        }
+        const nx = clamp((gamma - gyroGamma0) / GYRO_RANGE, -1, 1);
+        const ny = clamp((beta - gyroBeta0) / GYRO_RANGE, -1, 1);
+        target.rx = ny * MAX_TILT;
+        target.ry = -nx * MAX_TILT;
+        // 高光当作固定环境光：卡片向一侧倾，它向另一侧移
+        target.gx = 50 - nx * 50;
+        target.gy = 50 - ny * 50;
+        start();
+      };
+      window.addEventListener("deviceorientation", gyroHandler);
+    }
+
     return () => {
       window.removeEventListener("keydown", onkeydown);
       document.removeEventListener("visibilitychange", onvisibility);
+      if (gyroHandler) window.removeEventListener("deviceorientation", gyroHandler);
       if (frameId) cancelAnimationFrame(frameId);
       frameId = 0;
       // 关掉弹窗就别把整个应用留在全屏里
@@ -769,9 +839,7 @@
   bind:this={stage}
   role="presentation"
   onpointermove={onpointermove}
-  onpointerleave={() => {
-    if (!dragging) resetTilt();
-  }}
+  onpointerleave={onpointerleave}
   onpointerdown={onpointerdown}
   onpointerup={onpointerup}
   onpointercancel={onpointerup}
