@@ -61,11 +61,25 @@ pub async fn add_library(
 
     let library = with_db(&state, move |conn| {
         let name = library_name_from_path(&path);
-        conn.execute(
+        // 同一目录重复添加（SAF 授权被 ROM 记住时秒回，很容易连点两次）：
+        // 幂等返回已有的那条，而不是把 UNIQUE 约束错误原样甩到界面上
+        match conn.execute(
             "INSERT INTO libraries (path, name, created_at) VALUES (?1, ?2, ?3)",
             params![path, name, now_unix()],
-        )?;
-        fetch_library(conn, conn.last_insert_rowid())
+        ) {
+            Ok(_) => fetch_library(conn, conn.last_insert_rowid()),
+            Err(err) if err.to_string().contains("UNIQUE constraint failed: libraries.path") => {
+                let id: i64 = conn
+                    .query_row(
+                        "SELECT id FROM libraries WHERE path = ?1",
+                        params![path],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| AppError::Other(format!("读取已有图库失败: {err}")))?;
+                fetch_library(conn, id)
+            }
+            Err(err) => Err(err.into()),
+        }
     })
     .await?;
 

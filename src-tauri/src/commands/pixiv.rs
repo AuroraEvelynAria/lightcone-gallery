@@ -15,6 +15,7 @@
 //! 另外：这个端点**不需要也不该带 refresh_token**，所以不存在「认证失败还继续撞」
 //! 那条最危险的路 —— 最坏情况就是被限流。
 
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +37,7 @@ const REQUEST_INTERVAL: Duration = Duration::from_millis(800);
 
 /// 连续失败到这个数就中止整批。单次偶发失败（某条作品被删）不该触发，
 /// 所以数的是**连续**失败。
-const MAX_CONSECUTIVE_FAILURES: usize = 5;
+const MAX_CONSECUTIVE_FAILURES: usize = 3;
 
 /// 单次调用的抓取上限。界面分批调用，避免一个请求跑几十分钟还没法中断。
 pub const MAX_BATCH: usize = 300;
@@ -76,7 +77,7 @@ fn needs_meta() -> String {
 }
 
 /// 一批抓取的结果。
-#[derive(Debug, Clone, Copy, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MetaBatch {
     /// 成功取到并落库的条数
@@ -85,6 +86,10 @@ pub struct MetaBatch {
     pub missing: usize,
     /// 其它失败（网络、代理、限流）的条数
     pub failed: usize,
+    /// 最后一条失败的原始原因。界面上「失败 N」旁边显示它 —— 否则主人只看到
+    /// 「失败 5」却不知道是代理断了还是限流了，只能干等。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
     /// 因为连续失败过多而提前中止
     pub aborted: bool,
     /// 中止的原因是**被限流**（而不是网络不通）。界面要据此提示「过一阵再来」。
@@ -222,6 +227,7 @@ pub async fn fetch_all_meta(app: AppHandle, state: State<'_, AppState>) -> AppRe
         total.failed += batch.failed;
         total.overall_done += batch.fetched + batch.missing + batch.failed;
         total.rate_limited |= batch.rate_limited;
+        total.last_error = batch.last_error.clone();
 
         // 撞限流 / 连续失败：整轮停，不继续
         if batch.aborted {
@@ -277,6 +283,41 @@ async fn count_pending(state: &AppState) -> AppResult<usize> {
     .await
 }
 
+/// 代理连通性预检：只做 TCP 握手（2 秒超时），不发任何 HTTP 请求。
+///
+/// 通了不代表 pixiv 一定能走通（还要看代理的节点），但不通一定全不通 ——
+/// 这一档能在 2 秒内把「手机和电脑不在同一网络 / 代理没开 / 被手机上的
+/// VPN 劫持」和「请求本身的问题」区分开，主人不用再对着 20 秒超时干等。
+fn probe_proxy(url: &str) -> Result<(), String> {
+    // 手写解析就够了：配置里的形态就是 `http://host:port`（见 UI 提示文案）
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().unwrap_or(80)),
+        None => (rest, 80),
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+
+    let address = if let Ok(ip) = host.parse::<IpAddr>() {
+        SocketAddr::new(ip, port)
+    } else {
+        // 域名形式：本应用自己的配置一直是 IP；域名解析失败也如实报错
+        return Err(format!(
+            "代理地址「{url}」是域名，预检只支持 IP 形式；请改填 http://IP:端口"
+        ));
+    };
+
+    match TcpStream::connect_timeout(&address, Duration::from_secs(2)) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(format!(
+            "代理 {url} 连不上（{err}）：请确认电脑上的代理软件开着、\
+             已允许局域网连接，且手机与电脑在同一网络；手机上开着 VPN 时也可能劫持这条连接"
+        )),
+    }
+}
+
 /// 抓一批。`overall_done` / `overall_total` 只在自动补全时有意义，
 /// 用来让界面显示整轮进度而不是「本批第几条」。
 async fn fetch_batch(
@@ -322,6 +363,17 @@ async fn fetch_batch(
     }
 
     let client = pixiv::build_client(proxy.as_deref())?;
+    // 代理连通性预检：真发请求要等 20 秒超时才认输，连续失败 3 条 = 主人对着
+    // 「失败 3」干等一分钟。TCP 握手 2 秒就能判生死，错误文案直接告诉主人查什么。
+    if let Some(url) = proxy.as_deref().map(str::trim).filter(|url| !url.is_empty()) {
+        match probe_proxy(url) {
+            Ok(()) => eprintln!("[meta] 代理预检通过 {url}"),
+            Err(message) => {
+                eprintln!("[meta] 代理预检失败: {message}");
+                return Err(AppError::Other(message));
+            }
+        }
+    }
     let mut batch = MetaBatch::default();
     let mut consecutive_failures = 0usize;
 
@@ -353,6 +405,7 @@ async fn fetch_batch(
                 batch.rate_limited = true;
                 batch.aborted = true;
                 batch.failed += 1;
+                batch.last_error = Some(reason.clone());
                 let pid = pid.clone();
                 let note = format!("被限流，已中止：{reason}");
                 with_db(state, move |conn| mark_failed(conn, &pid, &note)).await?;
@@ -370,6 +423,7 @@ async fn fetch_batch(
             FetchOutcome::Failed(reason) => {
                 consecutive_failures += 1;
                 batch.failed += 1;
+                batch.last_error = Some(reason.clone());
                 let pid = pid.clone();
                 with_db(state, move |conn| mark_failed(conn, &pid, &reason)).await?;
 

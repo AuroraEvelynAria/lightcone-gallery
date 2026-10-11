@@ -124,6 +124,21 @@ pub fn build_client(proxy: Option<&str>) -> AppResult<reqwest::Client> {
         .map_err(|err| AppError::Other(format!("HTTP 客户端创建失败: {err}")))
 }
 
+/// 把错误连同它的整条 source 链拼成一句话。
+///
+/// reqwest 的顶层 display 只有一句 `error sending request for url (...)`，
+/// 真正的死因（超时 / 代理拒绝 / 证书）全在 source 链里 —— 不展开的话，
+/// 主人看到的失败原因永远是一句没有信息量的套话。
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(&format!(" ← {cause}"));
+        source = cause.source();
+    }
+    text
+}
+
 /// 取一条作品的元数据。**不做重试** —— 非 200 一律不重试，这是刻意的：
 /// 反复撞只会让 IP 更快被限流，失败写进 `error` 列下次再来更划算。
 pub async fn fetch_illust(client: &reqwest::Client, pid: &str) -> FetchOutcome {
@@ -138,8 +153,20 @@ pub async fn fetch_illust(client: &reqwest::Client, pid: &str) -> FetchOutcome {
         .send()
         .await
     {
-        Ok(response) => response,
-        Err(err) => return FetchOutcome::Failed(format!("请求失败: {err}")),
+        Ok(response) => {
+            eprintln!("[meta] {pid} HTTP {}", response.status());
+            response
+        }
+        Err(err) => {
+            let mut reason = format!("请求失败: {}", error_chain(&err));
+            // 经代理时「TLS 握手被对端断开 / 连接被重置」几乎总是节点侧的问题
+            // （节点连不上 Pixiv），不是本机的网络配置 —— 提示主人换节点
+            if reason.contains("tls handshake eof") || reason.contains("connection reset") {
+                reason.push_str(" —— 代理的节点连不上 Pixiv，去代理软件里换一个节点试试");
+            }
+            eprintln!("[meta] {pid} 失败: {reason}");
+            return FetchOutcome::Failed(reason);
+        }
     };
 
     let status = response.status();
