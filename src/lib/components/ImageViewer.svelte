@@ -126,6 +126,11 @@
 
   /** 最大倾角。卡牌类效果常用 ±14°，检视大图收敛到 7° 更稳。 */
   const MAX_TILT = 7;
+  /**
+   * 粗指针设备（重力感应）的倾角上限。手机上没有指针的精确移动，
+   * 倾斜本身就是输入——用足卡牌标准的 ±14°，比桌面鼠标的 7° 更放得开。
+   */
+  const GYRO_MAX_TILT = 14;
   /** 信息行微视差幅度（px）。沿鼠标反方向浮，要空间感但不动摇可读性。 */
   const META_PARALLAX = 6;
   /**
@@ -133,7 +138,7 @@
    * 首次读到传感器数据时把当时的姿态记为中性——人不会把手机举得端端正正，
    * 自动校准比要求「握正」现实；回到前台时重新校准（握持姿势多半变了）。
    */
-  const GYRO_RANGE = 20;
+  const GYRO_RANGE = 15;
   /** 每帧向目标插值的比例，≈140ms 时间常数。 */
   const EASE = 0.12;
   /** 收敛阈值，低于它就停掉 rAF。 */
@@ -275,9 +280,10 @@
   let gyroCalibrated = false;
 
   /**
-   * Generic Sensor 的 GravitySensor（Android WebView 支持、标准 DOM lib 没有
-   * 它的类型——就地声明最小形状）。重力矢量在设备坐标系里：手机正立面向
-   * 用户时 ≈ (0, −9.8, 0)。
+   * Generic Sensor 的 GravitySensor（标准 DOM lib 没有它的类型——就地声明
+   * 最小形状）。注意「构造器存在」不等于「真的出货」：部分 WebView 有接口
+   * 却永远不来 reading，管线探测见下方 effect。重力矢量在设备坐标系里：
+   * 手机正立面向用户时 ≈ (0, −9.8, 0)。
    */
   type GravitySensorLike = {
     gravity?: { x: number | null; y: number | null; z: number | null } | null;
@@ -799,45 +805,38 @@
 
     // 粗指针设备：重力感应接管光锥——卡片随手机倾斜（刚体感），
     // 高光当固定环境光反向移，信息行微视差从同一组 nx/ny 推出。
-    // 两条传感管线，按可用性二选一：
-    // - GravitySensor（Generic Sensor）：**Android WebView 里 deviceorientation
-    //   常常根本不派发**（WebView 的已知短板），重力传感器走的是受支持的
-    //   另一条管线——所以它是主选；
-    // - deviceorientation：Chrome 浏览器里正常，作为降级备选。
+    // 两条传感管线，按「真的出货」择优，不能只看构造器存不存在：
+    // - GravitySensor（Generic Sensor）：数据质量最好（融合后的纯重力矢量），
+    //   但部分 WebView（实测小米 Chrome 153）**有构造器、start() 不报错、
+    //   reading 却永远不来**——起步 700ms 内一条读数都没等到（或 start 抛错 /
+    //   派了 error）就切下面的备选；
+    // - deviceorientation：现代 WebView 其实都会派发（36Hz+），旧 WebView 才
+    //   缺失——作为兜底管线。
     let gyroHandler: ((event: DeviceOrientationEvent) => void) | null = null;
     let gravitySensor: GravitySensorLike | null = null;
-    // DOM lib 没有 GravitySensor 的类型——就地取构造器（Android WebView 有实现）
-    const GravitySensorCtor = (
-      window as unknown as {
-        GravitySensor?: new (options?: { frequency?: number }) => GravitySensorLike;
+    let gravityFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // 两条管线都归一化到「右倾为正的 roll + 与 beta 同向的 pitch」再落目标，
+    // 中性角自动校准：首次读数时的握持姿态就是 0，回前台时重校。
+    const applyPose = (roll: number, pitch: number): void => {
+      if (!gyroCalibrated) {
+        neutralRoll = roll;
+        neutralPitch = pitch;
+        gyroCalibrated = true;
       }
-    ).GravitySensor;
-    if (touchPrimary && !calm && GravitySensorCtor) {
-      const sensor = new GravitySensorCtor({ frequency: 30 });
-      sensor.addEventListener("reading", () => {
-        if (zoomed || !effectsEnabled) return;
-        const gx = sensor.gravity?.x ?? 0;
-        const gy = sensor.gravity?.y ?? 0;
-        const gz = sensor.gravity?.z ?? 0;
-        // 由重力矢量在设备坐标系的分量反解倾角：右倾/后仰为正
-        const roll = (Math.atan2(gx, -gy) * 180) / Math.PI;
-        const pitch = (Math.atan2(-gz, -gy) * 180) / Math.PI;
-        if (!gyroCalibrated) {
-          neutralRoll = roll;
-          neutralPitch = pitch;
-          gyroCalibrated = true;
-        }
-        const nx = clamp((roll - neutralRoll) / GYRO_RANGE, -1, 1);
-        const ny = clamp((pitch - neutralPitch) / GYRO_RANGE, -1, 1);
-        target.rx = ny * MAX_TILT;
-        target.ry = -nx * MAX_TILT;
-        target.gx = 50 - nx * 50;
-        target.gy = 50 - ny * 50;
-        start();
-      });
-      sensor.start();
-      gravitySensor = sensor;
-    } else if (touchPrimary && !calm && typeof window.DeviceOrientationEvent === "function") {
+      const nx = clamp((roll - neutralRoll) / GYRO_RANGE, -1, 1);
+      const ny = clamp((pitch - neutralPitch) / GYRO_RANGE, -1, 1);
+      target.rx = ny * GYRO_MAX_TILT;
+      target.ry = -nx * GYRO_MAX_TILT;
+      target.gx = 50 - nx * 50;
+      target.gy = 50 - ny * 50;
+      start();
+    };
+
+    const startOrientationPipeline = (): void => {
+      // 只有前一条管线确认没戏（超时 / 报错 / 不可用）才会走到这里，别叠监听
+      if (gyroHandler || gravitySensor) return;
+      if (typeof window.DeviceOrientationEvent !== "function") return;
       gyroHandler = (event: DeviceOrientationEvent): void => {
         if (event.beta === null || event.gamma === null) return;
         if (zoomed || !effectsEnabled) return;
@@ -852,26 +851,79 @@
         } else if (angle === 180) {
           [beta, gamma] = [-beta, -gamma];
         }
-        if (!gyroCalibrated) {
-          neutralPitch = beta;
-          neutralRoll = gamma;
-          gyroCalibrated = true;
-        }
-        const nx = clamp((gamma - neutralRoll) / GYRO_RANGE, -1, 1);
-        const ny = clamp((beta - neutralPitch) / GYRO_RANGE, -1, 1);
-        target.rx = ny * MAX_TILT;
-        target.ry = -nx * MAX_TILT;
-        target.gx = 50 - nx * 50;
-        target.gy = 50 - ny * 50;
-        start();
+        applyPose(gamma, beta);
       };
       window.addEventListener("deviceorientation", gyroHandler);
+    };
+
+    const abandonGravity = (sensor: GravitySensorLike): void => {
+      if (gravitySensor !== sensor) return;
+      gravitySensor = null;
+      sensor.stop();
+      startOrientationPipeline();
+    };
+
+    // DOM lib 没有 GravitySensor 的类型——就地取构造器（WebView 有实现）
+    const GravitySensorCtor = (
+      window as unknown as {
+        GravitySensor?: new (options?: { frequency?: number }) => GravitySensorLike;
+      }
+    ).GravitySensor;
+    if (touchPrimary && !calm && GravitySensorCtor) {
+      const sensor = new GravitySensorCtor({ frequency: 30 });
+      gravitySensor = sensor;
+      let gotReading = false;
+      sensor.addEventListener("reading", () => {
+        if (gravitySensor !== sensor) return; // 已被判死刑，迟到的读数作废
+        const gx = sensor.gravity?.x ?? null;
+        const gy = sensor.gravity?.y ?? null;
+        const gz = sensor.gravity?.z ?? null;
+        // 第二种坏法：reading 照派、gravity 却是 null/全零（同一台机器两种
+        // 都见过）——无效数据视同管线死亡，一样切 deviceorientation。
+        // 静止时重力模长 ≈ 9.8，0.5 以下不可能是真的重力。
+        if (
+          gx === null ||
+          gy === null ||
+          gz === null ||
+          Math.abs(gx) + Math.abs(gy) + Math.abs(gz) < 0.5
+        ) {
+          abandonGravity(sensor);
+          return;
+        }
+        if (!gotReading) {
+          gotReading = true;
+          if (gravityFallbackTimer) {
+            clearTimeout(gravityFallbackTimer);
+            gravityFallbackTimer = null;
+          }
+        }
+        if (zoomed || !effectsEnabled) return;
+        // 由重力矢量在设备坐标系的分量反解姿态角（右倾为正）。pitch 用
+        // atan2(gz, -gy) 而非取反 gz——和 deviceorientation 的 beta 同向
+        // （直立 ≈ 0，往后放平一路变小），切管线时手感才一致。
+        const roll = (Math.atan2(gx, -gy) * 180) / Math.PI;
+        const pitch = (Math.atan2(gz, -gy) * 180) / Math.PI;
+        applyPose(roll, pitch);
+      });
+      sensor.addEventListener("error", () => abandonGravity(sensor));
+      try {
+        sensor.start();
+        gravityFallbackTimer = setTimeout(() => {
+          gravityFallbackTimer = null;
+          if (!gotReading) abandonGravity(sensor);
+        }, 700);
+      } catch {
+        abandonGravity(sensor);
+      }
+    } else if (touchPrimary && !calm) {
+      startOrientationPipeline();
     }
 
     return () => {
       window.removeEventListener("keydown", onkeydown);
       document.removeEventListener("visibilitychange", onvisibility);
       if (gyroHandler) window.removeEventListener("deviceorientation", gyroHandler);
+      if (gravityFallbackTimer) clearTimeout(gravityFallbackTimer);
       gravitySensor?.stop();
       if (frameId) cancelAnimationFrame(frameId);
       frameId = 0;
