@@ -267,10 +267,24 @@
       window.matchMedia("(hover: none) and (pointer: coarse)").matches,
   );
 
-  // 重力感应的中性握持角（非响应式：只在传感器事件里读写）
-  let gyroBeta0 = 0;
-  let gyroGamma0 = 0;
+  // 重力感应的中性角（非响应式：只在传感器事件里读写）。
+  // roll = 左右倾（右倾为正），pitch = 前后倾（顶边后仰为正）——
+  // 两种传感器管线都归一化到这两个角，中性角自动校准。
+  let neutralRoll = 0;
+  let neutralPitch = 0;
   let gyroCalibrated = false;
+
+  /**
+   * Generic Sensor 的 GravitySensor（Android WebView 支持、标准 DOM lib 没有
+   * 它的类型——就地声明最小形状）。重力矢量在设备坐标系里：手机正立面向
+   * 用户时 ≈ (0, −9.8, 0)。
+   */
+  type GravitySensorLike = {
+    gravity?: { x: number | null; y: number | null; z: number | null } | null;
+    addEventListener(type: "reading" | "error", listener: () => void): void;
+    start(): void;
+    stop(): void;
+  };
 
   // ---------------------------------------------------------------------------
   // 光锥视差
@@ -784,18 +798,49 @@
     document.addEventListener("visibilitychange", onvisibility);
 
     // 粗指针设备：重力感应接管光锥——卡片随手机倾斜（刚体感），
-    // 高光当固定环境光反向移。轴随屏幕旋转交换；中性角自动校准。
-    // Android WebView 无需 iOS 那套 requestPermission，直接监听即可。
+    // 高光当固定环境光反向移，信息行微视差从同一组 nx/ny 推出。
+    // 两条传感管线，按可用性二选一：
+    // - GravitySensor（Generic Sensor）：**Android WebView 里 deviceorientation
+    //   常常根本不派发**（WebView 的已知短板），重力传感器走的是受支持的
+    //   另一条管线——所以它是主选；
+    // - deviceorientation：Chrome 浏览器里正常，作为降级备选。
     let gyroHandler: ((event: DeviceOrientationEvent) => void) | null = null;
-    if (touchPrimary && !calm) {
+    let gravitySensor: GravitySensorLike | null = null;
+    // DOM lib 没有 GravitySensor 的类型——就地取构造器（Android WebView 有实现）
+    const GravitySensorCtor = (
+      window as unknown as {
+        GravitySensor?: new (options?: { frequency?: number }) => GravitySensorLike;
+      }
+    ).GravitySensor;
+    if (touchPrimary && !calm && GravitySensorCtor) {
+      const sensor = new GravitySensorCtor({ frequency: 30 });
+      sensor.addEventListener("reading", () => {
+        if (zoomed || !effectsEnabled) return;
+        const gx = sensor.gravity?.x ?? 0;
+        const gy = sensor.gravity?.y ?? 0;
+        const gz = sensor.gravity?.z ?? 0;
+        // 由重力矢量在设备坐标系的分量反解倾角：右倾/后仰为正
+        const roll = (Math.atan2(gx, -gy) * 180) / Math.PI;
+        const pitch = (Math.atan2(-gz, -gy) * 180) / Math.PI;
+        if (!gyroCalibrated) {
+          neutralRoll = roll;
+          neutralPitch = pitch;
+          gyroCalibrated = true;
+        }
+        const nx = clamp((roll - neutralRoll) / GYRO_RANGE, -1, 1);
+        const ny = clamp((pitch - neutralPitch) / GYRO_RANGE, -1, 1);
+        target.rx = ny * MAX_TILT;
+        target.ry = -nx * MAX_TILT;
+        target.gx = 50 - nx * 50;
+        target.gy = 50 - ny * 50;
+        start();
+      });
+      sensor.start();
+      gravitySensor = sensor;
+    } else if (touchPrimary && !calm && typeof window.DeviceOrientationEvent === "function") {
       gyroHandler = (event: DeviceOrientationEvent): void => {
         if (event.beta === null || event.gamma === null) return;
         if (zoomed || !effectsEnabled) return;
-        if (!gyroCalibrated) {
-          gyroBeta0 = event.beta;
-          gyroGamma0 = event.gamma;
-          gyroCalibrated = true;
-        }
         // 屏幕旋转时 beta/gamma 的轴含义互换——按 screen.orientation.angle 重映射
         const angle = screen.orientation?.angle ?? 0;
         let beta = event.beta;
@@ -807,11 +852,15 @@
         } else if (angle === 180) {
           [beta, gamma] = [-beta, -gamma];
         }
-        const nx = clamp((gamma - gyroGamma0) / GYRO_RANGE, -1, 1);
-        const ny = clamp((beta - gyroBeta0) / GYRO_RANGE, -1, 1);
+        if (!gyroCalibrated) {
+          neutralPitch = beta;
+          neutralRoll = gamma;
+          gyroCalibrated = true;
+        }
+        const nx = clamp((gamma - neutralRoll) / GYRO_RANGE, -1, 1);
+        const ny = clamp((beta - neutralPitch) / GYRO_RANGE, -1, 1);
         target.rx = ny * MAX_TILT;
         target.ry = -nx * MAX_TILT;
-        // 高光当作固定环境光：卡片向一侧倾，它向另一侧移
         target.gx = 50 - nx * 50;
         target.gy = 50 - ny * 50;
         start();
@@ -823,6 +872,7 @@
       window.removeEventListener("keydown", onkeydown);
       document.removeEventListener("visibilitychange", onvisibility);
       if (gyroHandler) window.removeEventListener("deviceorientation", gyroHandler);
+      gravitySensor?.stop();
       if (frameId) cancelAnimationFrame(frameId);
       frameId = 0;
       // 关掉弹窗就别把整个应用留在全屏里
