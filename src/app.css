@@ -40,12 +40,32 @@
   --alpha-case: 1;
 }
 
+/* ---- 霞鹜文楷（LXGW WenKai）----------------------------------------
+   SIL OFL 1.1，许可全文见 static/fonts/OFL-LXGW-WenKai.txt。全字库 woff2
+   不做子集：用户内容里的汉字是任意的（标题、画师名、路径），子集化会
+   出现「界面一种字、生僻字另一种字」的混排断字。font-display: swap 让
+   首帧先用系统字体，解析完再换——8MB 的字库不该挡住首屏。 */
+@font-face {
+  font-family: "LXGW WenKai";
+  src: url("/fonts/LXGWWenKai-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "LXGW WenKai Mono";
+  src: url("/fonts/LXGWWenKaiMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+
 @theme {
   --font-sans:
-    "Inter", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
-  /* RhinE 用的是 Geist Mono；没随包分发字体文件，先用系统等宽栈顶上 */
+    "LXGW WenKai", "Segoe UI", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  /* 数据字体：文楷的等宽变体，PID / 路径 / 计数用它——与 ArtworkCard 已有的
+     font-mono 用法汇合。原来的 Geist Mono 一直只是系统等宽栈顶着。 */
   --font-mono:
-    ui-monospace, "Cascadia Mono", "Consolas", "Microsoft YaHei Mono", monospace;
+    "LXGW WenKai Mono", ui-monospace, "Cascadia Mono", "Consolas", monospace;
 
   /* 前景：从最强到最弱 */
   --color-fg: var(--tone-fg);
