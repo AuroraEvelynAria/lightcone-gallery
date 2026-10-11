@@ -112,9 +112,19 @@ pub async fn set_window_material(
         }
     };
 
+    // 材质是 Windows DWM 的专有能力，`WebviewWindow::set_effects` 只在桌面平台
+    // 编译（mobile 上没有这个方法，交叉编译在这里挂过）。移动端验证过参数就
+    // 吞掉——前端把材质选项藏起来之前，这条 no-op 保证命令不报错。
+    #[cfg(desktop)]
     window
         .set_effects(config)
-        .map_err(|err| AppError::Other(format!("应用窗口材质失败: {err}")))
+        .map_err(|err| AppError::Other(format!("应用窗口材质失败: {err}")))?;
+    #[cfg(not(desktop))]
+    {
+        let _ = config;
+        let _ = &window;
+    }
+    Ok(())
 }
 
 /// 读取全部键值设置。

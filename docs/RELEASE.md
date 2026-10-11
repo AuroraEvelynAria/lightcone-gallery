@@ -150,14 +150,26 @@ walkdir，Android 走 MediaStore 桥）**。SQLite、虚拟滚动、分块缓存
 
 需要的东西（括号里是本机现状）：
 
-| 组件 | 要求 | 本机 |
+| 组件 | 要求 | 本机（2026-10-11 实测已装齐） |
 | --- | --- | --- |
-| Android SDK | `platforms;android-37`（CLI 模板的 `compileSdk` / `targetSdk` 都是 37） | ❌ 没有 |
-| build-tools | 跟随 AGP 9.3.1（先装 `build-tools;37.0.0`，若报缺别的版本按它报的装） | ❌ 没有 |
-| NDK | **`29.0.13846066`** —— CLI 二进制里只出现这一个 NDK 版本号（`At least NDK …` 校验与 `sdkmanager --install "ndk;…"` 提示共用它） | ❌ 没有 |
-| CMake | 必须。`aws-lc-sys`（rustls 的加密后端）用 CMake 构建 | ❌ 没有 |
-| JDK | 17 或更高。本机是 JDK 25，处于 AGP/Gradle 支持范围的上沿、没实测过；稳妥起见装 JDK 21 LTS | ⚠️ 有 JDK 25 |
-| Rust target | `aarch64-linux-android` `armv7-linux-androideabi` `i686-linux-android` `x86_64-linux-android` | ❌ 只有 windows-msvc |
+| Android SDK | `platforms;android-36` + platform-tools（装在 `F:\Android\Sdk`）。**注意 `platforms;android-37` 在稳定仓库里不存在**（API 37 还在 canary 频道），生成的 Gradle 里 compileSdk/targetSdk 要手动从 37 改成 36 | ✅ |
+| build-tools | `build-tools;37.0.0`（稳定仓库里有，与 AGP 9.3.1 配合正常） | ✅ |
+| NDK | **`ndk;29.0.13846066`**（r29-beta3，2.4GB，装在 `F:\Android\Sdk\ndk\29.0.13846066`） | ✅ |
+| CMake | `cmake;3.22.1`（`aws-lc-sys` 用，SDK 自带 ninja） | ✅ |
+| JDK | 17+。**实测 zulu-24 跑通了 Gradle 9.6.1 + AGP 9.3.1**（zulu-25 跑 sdkmanager 也没问题） | ✅ zulu-24 |
+| Rust target | `aarch64-linux-android` `armv7-linux-androideabi` `i686-linux-android` `x86_64-linux-android` | ✅ 四个全装 |
+
+**2026-10-11 实测记录（第一次 aarch64 debug APK 已产出）**：
+
+- **下载源**：`dl.google.com` 与 sdkmanager 直连可达（无需代理）；但 **Gradle 发行包**
+  会重定向到 GitHub Releases——代理半死时会拿到 502/空文件。解法：从腾讯云镜像
+  `mirrors.cloud.tencent.com/gradle/gradle-9.6.1-bin.zip` 下载，铺进
+  `~/.gradle/wrapper/dists/gradle-9.6.1-bin/<hash>/`（hash = URL 的 MD5 转 base36）。
+- **crates.io 的移动端新依赖**（simd_cesu8 等，桌面构建从没拉过）走 Fake-IP 的
+  TUN 路由，**节点抖动时会「transfer too slow」连续重试失败**——重试一次往往就通。
+- `set_window_material` 的 `set_effects` 在 mobile 上不存在，已用 `#[cfg(desktop)]`
+  门控（移动端 no-op，材质选项前端应隐藏）。
+- debug APK 358MB 是正常体型（未剥离的 Rust 调试符号）；release + strip 会小一个量级。
 
 装法（cmdline-tools 版，不必装整个 Android Studio）：
 
