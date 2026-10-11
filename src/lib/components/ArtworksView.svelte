@@ -10,11 +10,14 @@
    * 卡片直接就能画出来。原图只在点击后的检视弹窗里加载。
    */
   import { onMount } from "svelte";
+  import { fade, fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
 
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   import { api, META_PROGRESS_EVENT, THUMBNAIL_PROGRESS_EVENT } from "$lib/api";
   import { artworks } from "$lib/artworks.svelte";
+  import { registerBackCloser } from "$lib/backStack.svelte";
   import ArtworkCard from "$lib/components/ArtworkCard.svelte";
   import ArtworkLightbox from "$lib/components/ArtworkLightbox.svelte";
   import VirtualGrid from "$lib/components/VirtualGrid.svelte";
@@ -46,6 +49,19 @@
   let ignoredCount = $state(0);
   /** 清空忽略名单的二次确认，与移除按钮同一套手势。 */
   let confirmingClear = $state(false);
+  /**
+   * 手机上的京东式筛选抽屉：画师/标签筛选从顶部两行胶囊收进右侧滑出面板，
+   * 纵向空间还给图片网格。桌面（md 以上）保持顶部常驻不变。
+   */
+  let filterOpen = $state(false);
+
+  $effect(() => {
+    if (!filterOpen) return;
+    return registerBackCloser(() => (filterOpen = false));
+  });
+
+  /** 有没有生效中的筛选条件（画师任一 / 标签同时包含）。 */
+  const hasFilter = $derived(artworks.artistUids.length > 0 || artworks.pixivTags.length > 0);
 
   // ---- 归类：画师 / 标签 --------------------------------------------------
   let artists = $state<ArtistSummary[]>([]);
@@ -257,6 +273,8 @@
     metaBusy = true;
     metaProgress = null;
     lastBatch = null;
+    // Android 上挂前台服务：批抓要跑一两分钟，挂着系统才不掐后台网络
+    if (isAndroid) await api.androidKeepAlive(true).catch(() => {});
     try {
       lastBatch = await api.fetchMissingMeta(100);
       await refreshTaxonomy();
@@ -265,6 +283,7 @@
     } finally {
       metaBusy = false;
       metaProgress = null;
+      if (isAndroid && !autoRunning) await api.androidKeepAlive(false).catch(() => {});
     }
   }
 
@@ -280,6 +299,9 @@
     autoStartedAt = Date.now();
     overall = { done: 0, total: 0 };
     lastBatch = null;
+    // Android 上挂前台服务：整轮要跑几十分钟，主人必然切走应用 —— 不挂的话
+    // 系统直接掐断后台网络，全部请求超时（真机实测 netpolicy blocked=APP_BACKGROUND）
+    if (isAndroid) await api.androidKeepAlive(true).catch(() => {});
     try {
       lastBatch = await api.fetchAllMeta();
       await refreshTaxonomy();
@@ -288,6 +310,7 @@
     } finally {
       autoRunning = false;
       metaProgress = null;
+      if (isAndroid) await api.androidKeepAlive(false).catch(() => {});
     }
   }
 
@@ -424,6 +447,118 @@
   }
 </script>
 
+  {#snippet filterBody(compact: boolean)}
+    <div class={compact ? "flex flex-col gap-3" : "flex flex-col gap-1.5"}>
+      <div class={compact ? "flex flex-col gap-1.5" : "flex flex-wrap items-center gap-2"}>
+        <span
+          class={compact
+            ? "text-[11px] font-semibold tracking-wide text-muted uppercase"
+            : "w-10 shrink-0 text-[11px] font-semibold tracking-wide text-muted uppercase"}
+          >画师</span
+        >
+        <input
+          bind:value={artistQuery}
+          placeholder="搜画师名或 uid…"
+          class="{compact
+            ? 'w-full'
+            : 'w-44'} rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none placeholder:text-mark focus:border-accent-500"
+        />
+        <div class={compact ? "flex flex-wrap gap-1.5" : "contents"}>
+          {#each visibleArtists as artist (artist.uid)}
+            <button
+              type="button"
+              class="cursor-pointer rounded-full border px-2.5 py-0.5 text-xs transition {artworks.artistUids.includes(
+              artist.uid)
+                ? 'border-accent-500 bg-accent-500/20 text-accent-400'
+                : 'border-surface-700 text-soft hover:border-surface-600 hover:text-fg'}"
+              aria-pressed={artworks.artistUids.includes(artist.uid)}
+              onclick={() => {
+                artworks.artistUids = toggle(artworks.artistUids, artist.uid);
+                void applyFilter();
+              }}
+            >
+              {artist.name} <span class="text-mark tabular-nums">{artist.artworks}</span>
+            </button>
+          {:else}
+            <span class="text-xs text-muted">没有匹配的画师</span>
+          {/each}
+        </div>
+        {#if artistQuery.trim() === "" && artists.length > CHIP_LIMIT}
+          <span class="text-[10px] text-mark">（只列作品最多的 {CHIP_LIMIT} 位，搜名字找其他）</span>
+        {/if}
+      </div>
+
+      <div class={compact ? "flex flex-col gap-1.5" : "flex flex-wrap items-center gap-2"}>
+        <span
+          class={compact
+            ? "text-[11px] font-semibold tracking-wide text-muted uppercase"
+            : "w-10 shrink-0 text-[11px] font-semibold tracking-wide text-muted uppercase"}
+          >标签</span
+        >
+        <input
+          bind:value={tagQuery}
+          placeholder="搜标签…"
+          class="{compact
+            ? 'w-full'
+            : 'w-44'} rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none placeholder:text-mark focus:border-accent-500"
+        />
+        <div class={compact ? "flex flex-wrap gap-1.5" : "contents"}>
+          {#each visibleTags as tag (tag.tag)}
+            <button
+              type="button"
+              class="cursor-pointer rounded-full border px-2.5 py-0.5 text-xs transition {artworks.pixivTags.includes(
+              tag.tag)
+                ? 'border-accent-500 bg-accent-500/20 text-accent-400'
+                : 'border-surface-700 text-soft hover:border-surface-600 hover:text-fg'}"
+              aria-pressed={artworks.pixivTags.includes(tag.tag)}
+              onclick={() => {
+                artworks.pixivTags = toggle(artworks.pixivTags, tag.tag);
+                void applyFilter();
+              }}
+            >
+              {tag.tag} <span class="text-mark tabular-nums">{tag.count}</span>
+            </button>
+          {:else}
+            <span class="text-xs text-muted">
+              {pixivTags.length === 0
+                ? "还没有标签数据 —— 点右边「补全 100 条元数据」联网取一次"
+                : "没有匹配的标签"}
+            </span>
+          {/each}
+        </div>
+        {#if tagQuery.trim() === "" && pixivTags.length > CHIP_LIMIT}
+          <span class="text-[10px] text-mark">（只列最常见的 {CHIP_LIMIT} 个）</span>
+        {/if}
+      </div>
+
+      {#if artworks.artistUids.length > 0 || artworks.pixivTags.length > 0}
+        <div class="flex items-center gap-2">
+          <span class="text-[11px] text-muted">
+            已筛选：
+            {#if artworks.artistUids.length > 0}
+              画师 <span class="text-accent-400">{artistNames()}</span>
+              <span class="text-mark">（任一）</span>
+            {/if}
+            {#if artworks.pixivTags.length > 0}
+              标签 <span class="text-accent-400">{artworks.pixivTags.join(" + ")}</span>
+              {#if artworks.pixivTags.length > 1}
+                <span class="text-mark">（同时包含）</span>
+              {/if}
+            {/if}
+            · 共 <span class="tabular-nums text-soft">{artworks.total}</span> 条
+          </span>
+          <button
+            type="button"
+            class="cursor-pointer rounded-md border border-accent-500 bg-accent-500/15 px-2 py-0.5 text-xs text-accent-400 transition hover:bg-accent-500/25"
+            onclick={clearFilter}
+          >
+            清除筛选
+          </button>
+        </div>
+      {/if}
+    </div>
+  {/snippet}
+
 <div class="flex h-full min-h-0 flex-1 flex-col text-fg">
   <!-- 与图库工具条同高同底色（h-14 / bg-surface-900 / px-4），观感上就是同一个壳；
        手机上允许换行 -->
@@ -454,7 +589,26 @@
       </p>
     </div>
 
-    <div class="hidden flex-1 md:block"></div>
+    <div class="flex-1"></div>
+
+    <!-- 手机：筛选收进右侧抽屉（京东式），按钮上挂已选条件数 -->
+    <button
+      type="button"
+      class="relative cursor-pointer rounded-md border px-3 py-1.5 text-xs transition md:hidden
+             {hasFilter
+               ? 'border-accent-500 bg-accent-500/15 text-accent-400'
+               : 'border-surface-700 text-soft'}"
+      onclick={() => (filterOpen = true)}
+    >
+      筛选
+      {#if hasFilter}
+        <span
+          class="absolute -top-1.5 -right-1.5 grid size-4 place-items-center rounded-full bg-accent-500 text-[10px] font-bold text-on-accent tabular-nums"
+        >
+          {artworks.artistUids.length + artworks.pixivTags.length}
+        </span>
+      {/if}
+    </button>
 
     {#if artworks.total > 0}
       <button
@@ -520,101 +674,12 @@
     而且原生下拉在自动化里驱动不了（合成点击弹不开、setValue 只给焦点）。
     改成「搜索框 + 热门胶囊」：搜索把候选收窄，点胶囊即筛选 —— 点击是真实按钮，
     既能测也好用。
+
+    手机（md 以下）整块收进右侧筛选抽屉（见底部 filterOpen），顶部只留一个
+    「筛选」按钮 —— 两行胶囊常驻会把一屏的纵向空间吃掉三分之一。
   -->
-  <div class="flex flex-col gap-1.5 border-b border-surface-800 bg-surface-900 px-4 py-2">
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="w-10 shrink-0 text-[11px] font-semibold tracking-wide text-muted uppercase"
-        >画师</span
-      >
-      <input
-        bind:value={artistQuery}
-        placeholder="搜画师名或 uid…"
-        class="w-44 rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none placeholder:text-mark focus:border-accent-500"
-      />
-      {#each visibleArtists as artist (artist.uid)}
-        <button
-          type="button"
-          class="cursor-pointer rounded-full border px-2.5 py-0.5 text-xs transition {artworks.artistUids.includes(
-          artist.uid)
-            ? 'border-accent-500 bg-accent-500/20 text-accent-400'
-            : 'border-surface-700 text-soft hover:border-surface-600 hover:text-fg'}"
-          aria-pressed={artworks.artistUids.includes(artist.uid)}
-          onclick={() => {
-            artworks.artistUids = toggle(artworks.artistUids, artist.uid);
-            void applyFilter();
-          }}
-        >
-          {artist.name} <span class="text-mark tabular-nums">{artist.artworks}</span>
-        </button>
-      {:else}
-        <span class="text-xs text-muted">没有匹配的画师</span>
-      {/each}
-      {#if artistQuery.trim() === "" && artists.length > CHIP_LIMIT}
-        <span class="text-[10px] text-mark">（只列作品最多的 {CHIP_LIMIT} 位，搜名字找其他）</span>
-      {/if}
-    </div>
-
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="w-10 shrink-0 text-[11px] font-semibold tracking-wide text-muted uppercase"
-        >标签</span
-      >
-      <input
-        bind:value={tagQuery}
-        placeholder="搜标签…"
-        class="w-44 rounded-md border border-surface-700 bg-surface-850 px-2 py-1 text-xs text-soft outline-none placeholder:text-mark focus:border-accent-500"
-      />
-      {#each visibleTags as tag (tag.tag)}
-        <button
-          type="button"
-          class="cursor-pointer rounded-full border px-2.5 py-0.5 text-xs transition {artworks.pixivTags.includes(
-          tag.tag)
-            ? 'border-accent-500 bg-accent-500/20 text-accent-400'
-            : 'border-surface-700 text-soft hover:border-surface-600 hover:text-fg'}"
-          aria-pressed={artworks.pixivTags.includes(tag.tag)}
-          onclick={() => {
-            artworks.pixivTags = toggle(artworks.pixivTags, tag.tag);
-            void applyFilter();
-          }}
-        >
-          {tag.tag} <span class="text-mark tabular-nums">{tag.count}</span>
-        </button>
-      {:else}
-        <span class="text-xs text-muted">
-          {pixivTags.length === 0
-            ? "还没有标签数据 —— 点右边「补全 100 条元数据」联网取一次"
-            : "没有匹配的标签"}
-        </span>
-      {/each}
-      {#if tagQuery.trim() === "" && pixivTags.length > CHIP_LIMIT}
-        <span class="text-[10px] text-mark">（只列最常见的 {CHIP_LIMIT} 个）</span>
-      {/if}
-    </div>
-
-    {#if artworks.artistUids.length > 0 || artworks.pixivTags.length > 0}
-      <div class="flex items-center gap-2">
-        <span class="text-[11px] text-muted">
-          已筛选：
-          {#if artworks.artistUids.length > 0}
-            画师 <span class="text-accent-400">{artistNames()}</span>
-            <span class="text-mark">（任一）</span>
-          {/if}
-          {#if artworks.pixivTags.length > 0}
-            标签 <span class="text-accent-400">{artworks.pixivTags.join(" + ")}</span>
-            {#if artworks.pixivTags.length > 1}
-              <span class="text-mark">（同时包含）</span>
-            {/if}
-          {/if}
-          · 共 <span class="tabular-nums text-soft">{artworks.total}</span> 条
-        </span>
-        <button
-          type="button"
-          class="cursor-pointer rounded-md border border-accent-500 bg-accent-500/15 px-2 py-0.5 text-xs text-accent-400 transition hover:bg-accent-500/25"
-          onclick={clearFilter}
-        >
-          清除筛选
-        </button>
-      </div>
-    {/if}
+  <div class="hidden flex-col gap-1.5 border-b border-surface-800 bg-surface-900 px-4 py-2 md:flex">
+    {@render filterBody(false)}
   </div>
 
   <!-- 联网补全元数据：标题 / 画师原名 / 标签 -->
@@ -738,6 +803,10 @@
         {:else if lastBatch.aborted}
           <span class="text-rose-400">· 连续失败过多已中止，检查代理是否开着</span>
         {/if}
+        {#if lastBatch.lastError}
+          <!-- 最后一条失败的原始原因：代理断 / 超时 / TLS，别让主人对着数字猜 -->
+          <span class="text-rose-400">（{lastBatch.lastError}）</span>
+        {/if}
       </span>
     {/if}
   </div>
@@ -825,9 +894,54 @@
   </main>
 </div>
 
+{#if filterOpen}
+  <!-- 京东式筛选抽屉（手机端）：顶部条只留按钮，筛选内容住在这里。
+       返回手势先收它（registerBackCloser），再轮到别的浮层。
+       滑入滑出走 Svelte 过渡：fly 沿 x 轴滑（max-w-96 = 384px 全程），
+       背幕淡入淡出，收起时能看到它滑回去而不是「啪一下没了」。 -->
+  <div
+    class="fixed inset-0 z-30 bg-black/50 md:hidden"
+    aria-hidden="true"
+    transition:fade={{ duration: 180 }}
+    onclick={() => (filterOpen = false)}
+  ></div>
+  <div
+    class="fixed inset-y-0 right-0 z-40 flex w-[85%] max-w-96 flex-col border-l border-surface-800
+           bg-surface-900 shadow-2xl md:hidden"
+    role="dialog"
+    aria-label="筛选作品"
+    transition:fly={{ x: 384, duration: 280, easing: cubicOut }}
+  >
+    <div
+      class="flex items-center justify-between border-b border-surface-800 px-4 py-3
+             pt-[calc(0.75rem+env(safe-area-inset-top))]"
+    >
+      <span class="text-sm font-semibold text-fg">筛选</span>
+      <button
+        type="button"
+        class="cursor-pointer rounded-md p-1.5 text-muted transition hover:bg-surface-850 hover:text-fg"
+        aria-label="收起筛选"
+        onclick={() => (filterOpen = false)}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+        </svg>
+      </button>
+    </div>
+    <div
+      class="min-h-0 flex-1 overflow-y-auto px-4 py-3 pb-[calc(1rem+env(safe-area-inset-bottom))]"
+    >
+      {@render filterBody(true)}
+    </div>
+  </div>
+{/if}
+
 {#if picked.size > 0}
-  <!-- 批量操作条 -->
-  <div class="pointer-events-none fixed bottom-5 left-1/2 z-40 -translate-x-1/2">
+  <!-- 批量操作条；bottom 加 safe-area，别被全面屏手势条压住 -->
+  <div
+    class="pointer-events-none fixed bottom-[calc(1.25rem+env(safe-area-inset-bottom))] left-1/2 z-40 -translate-x-1/2"
+    transition:fly={{ y: 64, duration: 240, easing: cubicOut }}
+  >
     <div
       class="pointer-events-auto flex flex-wrap items-center gap-3 rounded-card border
              border-surface-700 bg-surface-900/95 px-4 py-2.5 shadow-2xl backdrop-blur"

@@ -26,6 +26,9 @@ const KEY_SCHEME = "theme.scheme";
 const KEY_MATERIAL = "theme.material";
 const KEY_MODE = "theme.mode";
 
+/** Android WebView 没有 DWM 窗口材质，半透明令牌会直接透出底下内容（见 #writeDom）。 */
+const IS_ANDROID = typeof navigator !== "undefined" && navigator.userAgent.includes("Android");
+
 /** localStorage 的键前缀。与下面的 `KEY_*` 拼出 `lightcone.theme.scheme` 这样的键。 */
 const LS_PREFIX = "lightcone.";
 
@@ -168,7 +171,11 @@ class ThemeStore {
     root.dataset.scheme = this.scheme;
     root.dataset.mode = this.dark ? "dark" : "light";
 
-    const alpha = findMaterial(this.material).translucent ? ALPHA_TRANSLUCENT : ALPHA_SOLID;
+    // Android 的 WebView 背后没有 DWM 材质垫底：半透明变量直接把底下内容
+    // 透出来（主人看到的「抽屉和其他界面叠在一起」）。手机上一律按实色
+    // 算 alpha，选了什么材质都不影响可读性。
+    const translucent = findMaterial(this.material).translucent && !IS_ANDROID;
+    const alpha = translucent ? ALPHA_TRANSLUCENT : ALPHA_SOLID;
     root.style.setProperty("--alpha-bg", String(alpha.bg));
     root.style.setProperty("--alpha-panel", String(alpha.panel));
     root.style.setProperty("--alpha-case", String(alpha.case));
@@ -176,6 +183,9 @@ class ThemeStore {
 
   /** 下发窗口材质。材质或明暗没变就不重复调用。 */
   async #pushMaterial(): Promise<void> {
+    // 窗口材质是 Windows 专属（DWM 绘制），Android 上没有这回事，下发只会
+    // 收一条错误回来挂在界面上 —— 直接跳过。
+    if (IS_ANDROID) return;
     const key = `${this.material}:${this.dark}`;
     if (key === this.#applied) return;
     this.#applied = key;

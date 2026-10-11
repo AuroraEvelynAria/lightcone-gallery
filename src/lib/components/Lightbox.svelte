@@ -9,8 +9,10 @@
    * 所以状态只有 `immersive` 一个布尔值。
    */
   import { convertFileSrc } from "@tauri-apps/api/core";
+  import { fade } from "svelte/transition";
 
   import { api } from "$lib/api";
+  import { registerBackCloser } from "$lib/backStack.svelte";
   import { gallery } from "$lib/gallery.svelte";
   import { formatBytes, formatDate, formatDimensions } from "$lib/format";
   import type { IllustDetailView, Image, ImageDetail } from "$lib/types";
@@ -40,6 +42,14 @@
   let immersive = $state(false);
   /** 手机上右侧信息面板的开关（桌面常驻，此值无效果） */
   let panelOpen = $state(false);
+
+  // Android 返回手势：先收信息面板，再关整个弹窗（组件销毁时自动注销）
+  $effect(() => {
+    return registerBackCloser(() => {
+      if (panelOpen) panelOpen = false;
+      else onclose();
+    });
+  });
 
   // 切换图片时重新拉取详情（标签 / 相册归属）与 Pixiv 侧信息
   $effect(() => {
@@ -110,7 +120,12 @@
   }
 </script>
 
-<div class="viewer-shell fixed inset-0 z-50 flex backdrop-blur-sm" role="dialog" aria-modal="true">
+<div
+  class="viewer-shell fixed inset-0 z-50 flex backdrop-blur-sm"
+  role="dialog"
+  aria-modal="true"
+  transition:fade={{ duration: 160 }}
+>
   <div class="relative min-w-0 flex-1">
     <ImageViewer
       src={convertFileSrc(image.path)}
@@ -167,7 +182,7 @@
 
     <button
       type="button"
-      class="absolute top-4 right-4 z-10 cursor-pointer rounded-full bg-black/50 p-2 text-white/80
+      class="absolute top-[calc(1rem+env(safe-area-inset-top))] right-4 z-10 cursor-pointer rounded-full bg-black/50 p-2 text-white/80
              backdrop-blur transition hover:bg-black/70 hover:text-white"
       aria-label="关闭"
       title="关闭 (Esc)"
@@ -181,13 +196,16 @@
 
   {#if !immersive}
     <!-- 信息面板 -->
-    <!-- 手机：面板默认收起，ℹ️ 按钮开关，从右侧浮出；桌面：常驻右栏 -->
+    <!-- 手机：面板默认收起，ℹ️ 按钮开关，从右侧滑出（transform 过渡，不用
+         hidden 硬切）；桌面：常驻右栏，translate 强制归零 -->
     <div
       class="absolute inset-y-0 right-0 z-20 flex w-[88%] max-w-80 shrink-0 flex-col border-l
-             border-surface-800 bg-surface-900 shadow-2xl {panelOpen ? '' : 'hidden'}
-             md:static md:z-auto md:w-80 md:max-w-none md:shadow-none"
+             border-surface-800 bg-surface-900 shadow-2xl transition-transform duration-200 ease-out
+             {panelOpen ? 'translate-x-0' : 'translate-x-full invisible'} md:static md:z-auto
+             md:w-80 md:max-w-none md:translate-x-0 md:shadow-none md:visible"
     >
-      <div class="border-b border-surface-800 p-4">
+      <!-- 手机上面板顶到状态栏下面：头部加 safe-area 上边距（桌面 env() 为 0 无副作用） -->
+      <div class="border-b border-surface-800 p-4 pt-[calc(1rem+env(safe-area-inset-top))] md:pt-4">
         <p class="truncate text-sm font-semibold text-fg" data-selectable>{image.filename}</p>
         <p class="text-[11px] text-muted">
           {image.extension.toUpperCase()} · {formatDimensions(image.width, image.height)}

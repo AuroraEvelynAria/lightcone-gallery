@@ -124,6 +124,9 @@
     copyPath,
   }: Props = $props();
 
+  /** Android 上没有窗口材质/窗口 API，全屏走 HTML Fullscreen API。 */
+  const IS_ANDROID = typeof navigator !== "undefined" && navigator.userAgent.includes("Android");
+
   /** 最大倾角。卡牌类效果常用 ±14°，检视大图收敛到 7° 更稳。 */
   const MAX_TILT = 7;
   /**
@@ -161,6 +164,19 @@
   const FIRST_STEP = 1.3;
   /** 拖拽超过这个距离就不算「点击」，避免拖完顺手把弹窗关了。 */
   const DRAG_SLOP = 5;
+  /** 触屏横向滑动切图的最短行程（px），且要比纵向位移明显才算切图。 */
+  const SWIPE_NAV_DISTANCE = 64;
+  /** 触屏下滑关闭的最短行程（px）。 */
+  const SWIPE_CLOSE_DISTANCE = 110;
+  /** 滑动方向判定：主方向位移必须超过次方向的这个倍数，斜着滑不至于误触发。 */
+  const SWIPE_DOMINANCE = 1.4;
+  /** 双指捏合结束后低于这个倍率就弹回「适应窗口」，而不是停在 101% 的尴尬位置。 */
+  const PINCH_RESET_SCALE = 1.02;
+  /**
+   * 触屏滑动的跟手系数：< 1 是「橡皮筋」——卡片只走手指行程的一部分，
+   * 到不了边缘也关不掉（要超过阈值才触发），松手后弹回。
+   */
+  const DRAG_FOLLOW = 0.45;
 
   let stage = $state<HTMLElement | null>(null);
   /** 外层：量「去掉四周留白」的整块可用区域 */
@@ -257,6 +273,22 @@
   let pressedOnBlank = false;
   let pressedOnPhoto = false;
 
+  // ---- 触屏手势状态（非响应式：只在指针事件与 rAF 里读写） ------------------
+  /**
+   * 活动中的触点。双指在场上 = 捏合缩放；未放大时的单指 = 滑动
+   * （左右切图 / 下滑关闭）。放大后的单指平移仍走桌面那套 `dragging` 逻辑。
+   */
+  const touchPoints = new Map<number, { x: number; y: number }>();
+  /** 捏合起始快照：缩放从它按比例解算，逐帧重算才不会累积误差。 */
+  let pinchStart: { scale: number; tx: number; ty: number; dist: number } | null = null;
+  /** 单指滑动的起点（仅未放大时记录）。 */
+  let swipeStart: { x: number; y: number } | null = null;
+  /** 滑动的跟手位移，直接写进卡片 transform（--drag-x/y），不走插值管线。 */
+  let dragX = 0;
+  let dragY = 0;
+  /** 松手没到阈值时把 --drag-x/y 弹回 0，衰减在 tick() 里做。 */
+  let dragSpring = false;
+
   /** 系统是否要求减少动效。 */
   const calm = $derived(
     typeof window !== "undefined" &&
@@ -297,6 +329,27 @@
   // ---------------------------------------------------------------------------
 
   function onpointermove(event: PointerEvent): void {
+    // 触屏：先更新触点账本，再按当前手势分派。捏合优先于一切。
+    if (event.pointerType === "touch" && touchPoints.has(event.pointerId)) {
+      touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (pinchStart) {
+        if (touchPoints.size >= 2) applyPinch();
+        return;
+      }
+      // 未放大的单指滑动：橡皮筋跟手（画面只走手指行程的一部分），
+      // 只有下滑才算「关闭」——上滑不响应，免得和系统手势打架
+      if (swipeStart && !zoomed) {
+        dragX = (event.clientX - swipeStart.x) * DRAG_FOLLOW;
+        dragY = Math.max(0, event.clientY - swipeStart.y) * DRAG_FOLLOW;
+        dragged = Math.max(
+          dragged,
+          Math.abs(event.clientX - swipeStart.x) + Math.abs(event.clientY - swipeStart.y),
+        );
+        start();
+        return;
+      }
+    }
+
     if (dragging) {
       const dx = event.clientX - dragStart.x;
       const dy = event.clientY - dragStart.y;
@@ -354,6 +407,10 @@
       // 沿鼠标反方向浮——不新增插值状态，跟扫光共用同一套收敛
       stageNode.style.setProperty("--meta-x", `${-((gx - 50) / 50) * META_PARALLAX}px`);
       stageNode.style.setProperty("--meta-y", `${-((gy - 50) / 50) * META_PARALLAX}px`);
+      // 触屏滑动的跟手位移挂在**卡片**上（环境光/光晕/扫光跟着一起走），
+      // 直接写、不经插值 —— 回弹衰减在 tick() 里
+      stageNode.style.setProperty("--drag-x", `${dragX.toFixed(2)}px`);
+      stageNode.style.setProperty("--drag-y", `${dragY.toFixed(2)}px`);
     }
     const shotNode = shot;
     if (shotNode) {
@@ -362,15 +419,40 @@
       shotNode.style.setProperty("--ty", `${ty}px`);
       // 框尺寸写 width/height 而不是 scale()：scale 会把圆角一起放大。
       // 只在整数像素变化时才写，避免每帧都触发布局。
-      const size = frameSize(scale);
-      const w = Math.round(size.w);
-      const h = Math.round(size.h);
-      if (w !== lastFrame.w || h !== lastFrame.h) {
-        lastFrame = { w, h };
-        shotNode.style.width = `${w}px`;
-        shotNode.style.height = `${h}px`;
+      //
+      // 缩放动画进行中**冻结**这套写入：逐帧改尺寸 = 逐帧强制 layout，
+      // 手机上双指捏合会卡成幻灯片。动画期间框保持原尺寸、图片在内层
+      // img 的 transform 里放大（纯合成路径），收敛后这一帧条件重新成立、
+      // 一次性把框写到最终尺寸 —— 框的生长只在动画头尾各一次 layout。
+      const zoomAnimating = Math.abs(target.scale - scale) > 0.004;
+      if (!zoomAnimating) {
+        const size = frameSize(scale);
+        const w = Math.round(size.w);
+        const h = Math.round(size.h);
+        if (w !== lastFrame.w || h !== lastFrame.h) {
+          lastFrame = { w, h };
+          shotNode.style.width = `${w}px`;
+          shotNode.style.height = `${h}px`;
+          shotRect = null; // 布局框变了，缓存的矩形作废
+        }
       }
     }
+  }
+
+  /**
+   * shot 的布局框矩形，**缓存**。
+   *
+   * `zoomAt` / 双指捏合每帧都要「显示框中心的屏幕坐标」—— 直接每次
+   * `getBoundingClientRect()` 会强制同步 layout， pinch 的 60Hz 事件流
+   * 撞上它就是每次缩放都卡（手机实测）。shot 本体没有被 transform 过
+   * （位移/缩放都在它里面的 img 上），布局框只在 paint() 写尺寸时变化，
+   * 所以缓存到失效即可。
+   */
+  let shotRect: DOMRect | null = null;
+  function shotCenter(): { x: number; y: number } | null {
+    if (!shot) return null;
+    if (!shotRect) shotRect = shot.getBoundingClientRect();
+    return { x: shotRect.left + shotRect.width / 2, y: shotRect.top + shotRect.height / 2 };
   }
 
   function tick(): void {
@@ -383,7 +465,19 @@
     tx += (target.tx - tx) * ZOOM_EASE;
     ty += (target.ty - ty) * ZOOM_EASE;
 
+    // 滑动回弹：松手没到阈值时把卡片的跟手位移弹回 0
+    if (dragSpring) {
+      dragX += -dragX * 0.22;
+      dragY += -dragY * 0.22;
+      if (Math.abs(dragX) < 0.5 && Math.abs(dragY) < 0.5) {
+        dragX = 0;
+        dragY = 0;
+        dragSpring = false;
+      }
+    }
+
     const settled =
+      !dragSpring &&
       Math.abs(target.rx - rx) < SETTLE &&
       Math.abs(target.ry - ry) < SETTLE &&
       Math.abs(target.gx - gx) < SETTLE &&
@@ -525,24 +619,21 @@
    * `center + t + p * s`（s 是**真正画出来的**倍率）。要让 p 不动，解出新的 `t`。
    */
   function zoomAt(nextScale: number, clientX: number, clientY: number): void {
-    const node = shot;
-    if (!node) {
+    const center = shotCenter();
+    if (!center) {
       apply(nextScale, tx, ty);
       return;
     }
 
     const next = clamp(nextScale, 1, MAX_ZOOM);
-    const rect = node.getBoundingClientRect();
-    // 显示框本身没被变换过（位移和缩放都加在里面那张 <img> 上），所以它的矩形
-    // 中心就是「未变换时的中心」—— 这里**不能**再减 tx / ty，那会把位移算两遍。
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
+    // 显示框中心：shot 本体没被变换过，布局框中心就是「未变换时的中心」——
+    // 这里**不能**再减 tx / ty，那会把位移算两遍。矩形来自缓存（见 shotCenter）。
 
     // 位移和缩放都加在里面那张 <img> 上、以它的中心为原点，所以「让光标下那点
     // 不动」解出来就是 `t' = d - (d - t) * k`，k 是这次缩放前后真实倍率之比。
     const k = next / scale;
-    const dx = clientX - centerX;
-    const dy = clientY - centerY + centerShiftY(next);
+    const dx = clientX - center.x;
+    const dy = clientY - center.y + centerShiftY(next);
     apply(next, dx - (dx - tx) * k, dy - (dy - ty) * k);
   }
 
@@ -576,6 +667,12 @@
     // 箭头和 meta 行是舞台的子孙、没有挡，放大态点它们会「毫无反应」。
     // 非放大态本来就不捕获，这行提前返回不影响任何行为。
     if (event.target instanceof Element && event.target.closest("button, a")) return;
+    // 触屏多指记账：双指 → 捏合缩放；未放大的单指 → 滑动（切图 / 下滑关闭）
+    if (event.pointerType === "touch") {
+      touchPoints.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (touchPoints.size === 2) beginPinch();
+      else if (!zoomed) swipeStart = { x: event.clientX, y: event.clientY };
+    }
     if (!zoomed || event.button !== 0) return;
     dragging = true;
     dragStart = { x: event.clientX, y: event.clientY, tx, ty };
@@ -583,7 +680,48 @@
     event.preventDefault();
   }
 
+  /**
+   * 松手判定：横向主导 → 切图（左滑下一张、右滑上一张），纵向下滑 → 关闭，
+   * 其余（没滑够远 / 方向不明确）把卡片弹回原位。
+   */
+  function finishSwipe(dx: number, dy: number): void {
+    const horizontal =
+      Math.abs(dx) > SWIPE_NAV_DISTANCE && Math.abs(dx) > Math.abs(dy) * SWIPE_DOMINANCE;
+    const down = dy > SWIPE_CLOSE_DISTANCE && dy > Math.abs(dx) * SWIPE_DOMINANCE;
+    if (down) {
+      // 关闭交给弹窗卸载，位移清零免得卸载前一帧卡片斜着飞走
+      dragX = 0;
+      dragY = 0;
+      paint();
+      onclose();
+      return;
+    }
+    dragSpring = true;
+    if (horizontal && onnavigate) {
+      dragX = 0;
+      dragY = 0;
+      // 左滑（dx<0）看下一张 —— 与桌面 ← → 箭头同方向语义
+      onnavigate(dx < 0 ? 1 : -1);
+    }
+    start();
+  }
+
   function onpointerup(event: PointerEvent): void {
+    // 触屏手势收尾：捏合按剩余手指数交棒，滑动按主方向判定
+    if (event.pointerType === "touch") {
+      touchPoints.delete(event.pointerId);
+      if (pinchStart) {
+        if (touchPoints.size < 2) endPinch();
+        return; // 捏合中个别手指起落不当作滑动
+      }
+      if (swipeStart && touchPoints.size === 0) {
+        const dx = event.clientX - swipeStart.x;
+        const dy = event.clientY - swipeStart.y;
+        swipeStart = null;
+        finishSwipe(dx, dy);
+        return;
+      }
+    }
     if (!dragging) return;
     dragging = false;
     if (stage?.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
@@ -600,6 +738,73 @@
    */
   function isBlank(node: EventTarget | null): boolean {
     return node === stage || node === frame || node === inner;
+  }
+
+  // ---- 触屏：双指捏合缩放 ---------------------------------------------------
+
+  /** 两指间距 / 中点。调用方保证场上至少有两根手指。 */
+  function pinchDistance(): number {
+    const [a, b] = [...touchPoints.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y);
+  }
+
+  function pinchMidpoint(): { x: number; y: number } {
+    const [a, b] = [...touchPoints.values()];
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  /**
+   * 进入捏合：快照当前**目标**值并把它钉成现值（清掉插值残差），之后每一帧
+   * 都从快照按「距离比」解算 —— 事件频率和 rAF 不同步，增量式解算会累积误差。
+   */
+  function beginPinch(): void {
+    swipeStart = null;
+    dragging = false;
+    pinchStart = {
+      scale: target.scale,
+      tx: target.tx,
+      ty: target.ty,
+      dist: pinchDistance(),
+    };
+    scale = target.scale;
+    tx = target.tx;
+    ty = target.ty;
+    start();
+  }
+
+  /**
+   * 捏合解算：以两指中点为锚缩放（中点下的画面内容保持不动），
+   * 几何与 `zoomAt` 同一套，只是基准从「当前值」换成「快照值」。
+   */
+  function applyPinch(): void {
+    if (!pinchStart || pinchStart.dist <= 0) return;
+    const next = clamp(
+      pinchStart.scale * (pinchDistance() / pinchStart.dist),
+      1,
+      MAX_ZOOM,
+    );
+    const center = shotCenter();
+    if (!center) return;
+    // 显示框中心：矩形来自缓存（见 shotCenter），捏合高频事件里不做 layout
+    const mid = pinchMidpoint();
+    const k = next / pinchStart.scale;
+    const dx = mid.x - center.x;
+    const dy = mid.y - center.y + centerShiftY(next);
+    apply(next, dx - (dx - pinchStart.tx) * k, dy - (dy - pinchStart.ty) * k);
+  }
+
+  /** 捏合结束：缩到接近 1 就回「适应窗口」；还剩一根手指就无缝转成平移。 */
+  function endPinch(): void {
+    pinchStart = null;
+    if (target.scale <= PINCH_RESET_SCALE) {
+      resetZoom();
+      return;
+    }
+    if (touchPoints.size === 1) {
+      const [p] = [...touchPoints.values()];
+      dragStart = { x: p.x, y: p.y, tx, ty };
+      dragging = true;
+    }
   }
 
   function ondoubleclick(event: MouseEvent): void {
@@ -625,6 +830,19 @@
   // ---------------------------------------------------------------------------
 
   async function applyFullscreen(next: boolean): Promise<void> {
+    // Android：Tauri 的窗口 API 在移动端是空架子，wry 对 HTML Fullscreen 也是
+    // 空壳（onShowCustomView 立刻回调 onCustomViewHidden）—— 真正能收起系统栏
+    // 的是 insets controller，走自家 Kotlin 桥的 immersive 命令。桌面走 Tauri。
+    if (IS_ANDROID) {
+      try {
+        await api.androidImmersive(next);
+        fullscreen = next;
+        onfullscreen?.(next);
+      } catch {
+        // 桥调用失败：静默放弃，不打断看图
+      }
+      return;
+    }
     try {
       await getCurrentWindow().setFullscreen(next);
       fullscreen = next;
@@ -693,6 +911,13 @@
       target = { rx: 0, ry: 0, gx: 50, gy: 50, scale: 1, tx: 0, ty: 0 };
       zoomPercent = 100;
       zoomed = false;
+      // 换图时手势一并作废：滑动/捏合的中途状态不能带进下一张
+      touchPoints.clear();
+      pinchStart = null;
+      swipeStart = null;
+      dragX = 0;
+      dragY = 0;
+      dragSpring = false;
       if (frameId) cancelAnimationFrame(frameId);
       frameId = 0;
       paint();
@@ -802,6 +1027,16 @@
 
     window.addEventListener("keydown", onkeydown);
     document.addEventListener("visibilitychange", onvisibility);
+    // Android 沉浸模式下用户按返回会先退出系统全屏：状态跟着系统走，
+    // 否则组件以为还在全屏、面板收不回来
+    const onFullscreenChange = (): void => {
+      const active = document.fullscreenElement !== null;
+      if (active !== fullscreen) {
+        fullscreen = active;
+        onfullscreen?.(active);
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
 
     // 粗指针设备：重力感应接管光锥——卡片随手机倾斜（刚体感），
     // 高光当固定环境光反向移，信息行微视差从同一组 nx/ny 推出。
@@ -922,6 +1157,7 @@
     return () => {
       window.removeEventListener("keydown", onkeydown);
       document.removeEventListener("visibilitychange", onvisibility);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
       if (gyroHandler) window.removeEventListener("deviceorientation", gyroHandler);
       if (gravityFallbackTimer) clearTimeout(gravityFallbackTimer);
       gravitySensor?.stop();
@@ -966,15 +1202,17 @@
         <div class="viewer__stack">
           <div class="viewer__scene">
             <div class="viewer__card">
-              <!-- 环境光：同一张原图糊开，氛围色跟着画走。filter 是分组属性，
-                   只能落在叶子节点上——套到 card 会压平整个 3D -->
-              <img
-                src={src}
-                alt=""
-                aria-hidden="true"
-                draggable="false"
-                class="viewer__ambient"
-              />
+              <!-- 环境光：同一张原图糊开，氛围色跟着画走。blur/mask 必须拆
+                   两层（理由见样式表），wrapper 与 img 都是叶子，不压 3D -->
+              <div class="viewer__ambient-wrap">
+                <img
+                  src={src}
+                  alt=""
+                  aria-hidden="true"
+                  draggable="false"
+                  class="viewer__ambient"
+                />
+              </div>
 
               <!-- 光锥底：背光场 -->
               <div class="viewer__halo"></div>
@@ -1183,6 +1421,12 @@
     /* 大图约 60vh 高，1.5× 是「能明显看出景深但不变形」的档位 */
     perspective: 900px;
     perspective-origin: 50% 50%;
+    /*
+      触屏手势（切图 / 下滑关闭 / 双指捏合）全归组件的 pointer 事件管：
+      不关掉的话 WebView 会把触摸抢去当滚动 / 页面缩放，指针流半路收到
+      pointercancel，手势就断了。工具条按钮的 click 不受影响。
+    */
+    touch-action: none;
   }
 
   .viewer.is-dragging {
@@ -1195,12 +1439,16 @@
     height: 100%;
   }
 
-  /* 内层：padding 在这一层，clientWidth/Height 就是「带留白的区域」 */
+  /* 内层：padding 在这一层，clientWidth/Height 就是「带留白的区域」。
+     上下补 safe-area：弹窗壳是 fixed inset-0 顶到系统栏底下的。
+     注意 zoomed 态的上边距也要带 env —— 两种状态的上边距之差必须恒为
+     1rem（PAD_TOP），zoomAt 的锚点纵向修正 centerShiftY 靠这个假设。 */
   .viewer__inner {
     display: grid;
     width: 100%;
     height: 100%;
-    padding: 1rem 1rem 4.5rem;
+    padding: calc(1rem + env(safe-area-inset-top, 0px)) 1rem
+      calc(4.5rem + env(safe-area-inset-bottom, 0px));
     place-items: center;
   }
 
@@ -1212,7 +1460,8 @@
     尺寸和容器要一起改，留白才算真的吃掉。
   */
   .viewer.is-zoomed .viewer__inner {
-    padding: 0 0 4.5rem 0;
+    padding: env(safe-area-inset-top, 0px) 0
+      calc(4.5rem + env(safe-area-inset-bottom, 0px));
   }
 
   /* 竖排：卡片在上，信息行在下 */
@@ -1243,7 +1492,10 @@
   .viewer__card {
     position: relative;
     transform-style: preserve-3d;
-    transform: rotateX(var(--rx)) rotateY(var(--ry));
+    /* 触屏滑动的跟手位移在最外层（--drag-x/y，写自 paint()），与倾斜共存于
+       同一个 transform —— 拆成独立属性会把 preserve-3d 压平（见组件头注释） */
+    transform: translate3d(var(--drag-x, 0px), var(--drag-y, 0px), 0)
+      rotateX(var(--rx)) rotateY(var(--ry));
     will-change: transform;
   }
 
@@ -1251,19 +1503,37 @@
      氛围色取自画本身而不是配色方案——每换一张图，光锥的环境色跟着走。
      blur 是分组属性，只能待在叶子节点上；inset 外扩 + scale 是为了把
      blur 在边缘吃出来的透明圈藏到卡片后面。
-     mask 是这道光的命门：糊开的原图仍是一张「矩形的鬼影」，不遮的话它
-     的边界（以及被窗口边缘 / 信息面板切断处）会显出一圈色彩断层——
-     椭圆遮罩让它贴着卡片后方保持满强度、往外一路溶成零，光晕在抵达
-     任何边界之前就化没了。mask 同样是分组属性，照样只能待在叶子上。 */
-  .viewer__ambient {
+
+     blur 和 mask **必须拆两层**：blur 作用在 mask 之后（浏览器先按椭圆
+     裁好、再用高斯卷积抹开），椭圆边界会被涂出 ~2σ（blur48 → ±96px）的
+     色带——光锥一倾斜，视差把这圈色带从照片后面甩出来，主人看到的
+     「漏出采样背景色」就是它。现在 wrapper 负责椭圆 mask + 3D 定位，
+     img 只负责 blur：wrapper 的 mask 裁掉 img 模糊的全部溢出，倾角再大
+     也不会有边界漏出来。mask 同样是分组属性，wrapper 是叶子，不压 3D。 */
+  .viewer__ambient-wrap {
     position: absolute;
     inset: -8%;
-    object-fit: cover;
     transform: translateZ(-64px) scale(1.2);
-    filter: blur(48px) saturate(1.25);
-    mask-image: radial-gradient(50% 50% at 50% 50%, #000 60%, transparent 96%);
-    -webkit-mask-image: radial-gradient(50% 50% at 50% 50%, #000 60%, transparent 96%);
+    /* 光晕环要窄：满强度压到 55%（rgb 的 alpha），归零点收到 85% —— 只在
+       卡片边缘外一小圈柔和过渡。环一宽（旧版 60%→96%），糊开的暖色在
+       浅色主题的背幕上就是一片随倾斜晃动的「色块」（真机实拍确认）。 */
+    mask-image: radial-gradient(50% 50% at 50% 50%, rgb(0 0 0 / 0.55) 55%, transparent 85%);
+    -webkit-mask-image: radial-gradient(
+      50% 50% at 50% 50%,
+      rgb(0 0 0 / 0.55) 55%,
+      transparent 85%
+    );
     pointer-events: none;
+    transition: opacity 0.25s ease-out;
+  }
+
+  .viewer__ambient {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    filter: blur(48px) saturate(1.25);
   }
 
   /* ---- 光锥底 -------------------------------------------------------- */
@@ -1274,12 +1544,13 @@
     border-radius: 50%;
     background: radial-gradient(
       circle at 50% 50%,
-      color-mix(in oklab, var(--tone-accent) 34%, transparent) 0%,
-      color-mix(in oklab, var(--tone-accent) 12%, transparent) 42%,
-      transparent 72%
+      color-mix(in oklab, var(--tone-accent) 25%, transparent) 0%,
+      color-mix(in oklab, var(--tone-accent) 9%, transparent) 34%,
+      transparent 58%
     );
     filter: blur(18px);
     pointer-events: none;
+    transition: opacity 0.25s ease-out;
   }
 
   /* ---- 原图：圆角裁切在这一层（不能上移到卡片，会压平 3D） ---------- */
@@ -1493,7 +1764,7 @@
   /* ---- 底部工具条 ---------------------------------------------------- */
   .viewer__tools {
     position: absolute;
-    bottom: 1rem;
+    bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
     left: 50%;
     translate: -50% 0;
     display: flex;
@@ -1595,10 +1866,21 @@
 
   /* ---- 特效总开关：关掉后变成朴素平面显示 ---------------------------- */
   .viewer.is-flat .viewer__halo,
-  .viewer.is-flat .viewer__ambient,
+  .viewer.is-flat .viewer__ambient-wrap,
   .viewer.is-flat .viewer__glare,
   .viewer.is-flat .viewer__sheen {
     display: none;
+  }
+
+  /* 放大是看细节的时刻：光晕/扫光这些氛围层不仅没意义，blur(48px) 的
+     大图层挂在合成树里还会把缩放拖成幻灯片（手机实测）—— 淡出并从
+     合成树摘掉，回 100% 时再淡入。opacity 是分组属性，这几层都是叶子，
+     不会压平 3D。 */
+  .viewer.is-zoomed .viewer__ambient-wrap,
+  .viewer.is-zoomed .viewer__halo,
+  .viewer.is-zoomed .viewer__glare,
+  .viewer.is-zoomed .viewer__sheen {
+    opacity: 0;
   }
 
   .viewer.is-flat .viewer__meta {

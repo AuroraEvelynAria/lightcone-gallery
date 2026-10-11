@@ -34,6 +34,10 @@
   >
     <p class="truncate text-xs font-medium text-white">{image.filename}</p>
     <p class="truncate text-[10px] text-soft">
+      {#if image.pid}
+        PID {image.pid}
+        ·
+      {/if}
       {formatBytes(image.fileSize)}
       {#if image.width && image.height}
         · {image.width}×{image.height}

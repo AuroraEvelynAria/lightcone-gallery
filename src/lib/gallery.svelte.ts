@@ -231,6 +231,8 @@ class GalleryStore {
     if (selection.kind !== "artworks") void this.refreshImages();
   }
 
+  /** 桌面：系统目录对话框选图库根目录。Android 上走 Sidebar 的自绘选目录面板
+   * （SAF 的 DocumentsUI 浏览大目录会崩，见 addLibraryAt）。 */
   async addLibrary(): Promise<void> {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const picked = await open({
@@ -239,9 +241,13 @@ class GalleryStore {
       title: "选择图库根目录",
     });
     if (typeof picked !== "string") return;
+    await this.addLibraryAt(picked);
+  }
 
+  /** 登记目录并立即扫描 —— 桌面对话框与 Android 选目录面板共用的后半段。 */
+  async addLibraryAt(path: string): Promise<void> {
     try {
-      const library = await api.addLibrary(picked);
+      const library = await api.addLibrary(path);
       await this.scan(library.id);
     } catch (err) {
       this.error = String(err);

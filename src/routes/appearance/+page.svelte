@@ -8,6 +8,9 @@
   import { theme } from "$lib/theme.svelte";
   import { findScheme, MATERIALS, SCHEMES, type SchemeId, type ThemeMode } from "$lib/themes";
 
+  /** 手机上没有窗口材质这回事（WebView 背后没有 DWM），材质区整个收起。 */
+  const isAndroid = navigator.userAgent.includes("Android");
+
   const MODES: { id: ThemeMode; name: string; note: string }[] = [
     { id: "system", name: "跟随系统", note: "跟着 Windows 的浅色 / 深色设置走" },
     { id: "light", name: "浅色", note: "固定浅色，忽略系统设置" },
@@ -104,7 +107,8 @@
         </div>
       </section>
 
-      <!-- 窗口材质 -->
+      <!-- 窗口材质：手机端没有 DWM，整个收起（半透明令牌在 WebView 里会穿帮） -->
+      {#if !isAndroid}
       <section>
         <div class="mb-3 flex items-baseline justify-between">
           <h2 class="font-mono text-[11px] font-semibold tracking-wide text-muted uppercase">
@@ -135,6 +139,7 @@
           换「纯色」即可。
         </p>
       </section>
+      {/if}
 
       <!-- 明暗 -->
       <section>

@@ -86,6 +86,12 @@ export const api = {
   stats: () => invoke<Stats>("library_stats"),
   thumbnailCacheUsage: () => invoke<CacheUsage>("thumbnail_cache_usage"),
   clearThumbnailCache: () => invoke<void>("clear_thumbnail_cache"),
+  /**
+   * 退出应用。Android 全面屏返回手势的最后一站：MainActivity 把系统返回
+   * 转发成 `lc-android-back`，前端的关闭栈（弹窗 → 抽屉 → …）都空了才调这里。
+   * 桌面上没有返回手势，永远不会走到。
+   */
+  exitApp: () => invoke<void>("exit_app"),
 
   // ---- 外观（阶段三）------------------------------------------------------
   /**
@@ -103,6 +109,31 @@ export const api = {
   /** 写入若干键值设置（同名的键直接覆盖）。 */
   saveSettings: (entries: Record<string, string>) =>
     invoke<void>("save_settings", { entries }),
+
+  /** Android 沉浸式全屏：隐藏 / 恢复状态栏与手势条（检视弹窗的全屏按钮）。 */
+  androidImmersive: (enabled: boolean) =>
+    invoke<void>("android_immersive", { enabled }),
+  /**
+   * Android 前台服务开关：元数据补全期间挂通知栏常驻服务，豁免「应用后台
+   * 断网」的系统省电策略（不挂的话主人一切走应用，网络立刻被掐）。
+   */
+  androidKeepAlive: (enabled: boolean) =>
+    invoke<void>("android_keep_alive", { enabled }),
+  /**
+   * 列出一个目录的子目录（各带直属图片数）与它直属的图片数。
+   * 实时 readdir 文件系统 —— 比 MediaStore 的索引准确（那个滞后且波动）。
+   * Android 上传 `/storage/emulated/0/...` 形式的路径。
+   */
+  listSubdirs: (path: string) =>
+    invoke<{ subdirs: { name: string; imageCount: number }[]; directImages: number }>(
+      "android_list_subdirs",
+      { path },
+    ),
+  /**
+   * Android 系统目录选择器（SAF）。返回选中的物理路径（取消为空串），
+   * 之后走与桌面相同的 add_library → walkdir 管线。
+   */
+  androidPickDirectory: () => invoke<string>("android_pick_directory"),
 
   // ---- 作品（阶段一：Pixiv 维度）------------------------------------------
   /** 扫描一个本地文件夹，解析 `{pid}_p{num}` 入库，并为缺缩略图的作品生成 WebP */

@@ -6,8 +6,10 @@
    * 同一个内核，两边手感必须一致，所以这里只剩作品自己的一条信息栏。
    */
   import { convertFileSrc } from "@tauri-apps/api/core";
+  import { fade } from "svelte/transition";
 
   import { api } from "$lib/api";
+  import { registerBackCloser } from "$lib/backStack.svelte";
   import type { Artwork, IllustDetailView } from "$lib/types";
 
   import ImageViewer from "./ImageViewer.svelte";
@@ -32,6 +34,9 @@
   /** Pixiv 侧的信息（标题 / 画师 / 官方标签）。null 表示还没补全过元数据。 */
   let illust = $state<IllustDetailView | null>(null);
   let failed = $state(false);
+
+  // Android 返回手势：有弹窗在就先关弹窗，而不是退出应用（销毁时自动注销）
+  $effect(() => registerBackCloser(onclose));
 
   $effect(() => {
     const pid = artwork.pid;
@@ -60,8 +65,12 @@
   role="dialog"
   aria-modal="true"
   aria-label={`作品 ${artwork.pid} 第 ${artwork.page} 页`}
+  transition:fade={{ duration: 160 }}
 >
-  <header class="relative z-10 flex items-center gap-3 px-5 py-3 text-soft">
+  <!-- 弹窗壳是 fixed inset-0 顶到状态栏底下：header 上边距补 safe-area -->
+  <header
+    class="relative z-10 flex items-center gap-3 px-5 py-3 pt-[calc(0.75rem+env(safe-area-inset-top))] text-soft"
+  >
     <span class="font-mono text-sm font-semibold text-accent-400" title="Pixiv 作品号">
       {artwork.pid}
     </span>

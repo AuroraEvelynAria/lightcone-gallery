@@ -1,11 +1,15 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fade, fly } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
 
   import ArtworksView from "$lib/components/ArtworksView.svelte";
   import ImageGrid from "$lib/components/ImageGrid.svelte";
   import Lightbox from "$lib/components/Lightbox.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import Toolbar from "$lib/components/Toolbar.svelte";
+  import { api } from "$lib/api";
+  import { handleBack, registerBackCloser } from "$lib/backStack.svelte";
   import { gallery } from "$lib/gallery.svelte";
   import type { Image } from "$lib/types";
 
@@ -14,15 +18,32 @@
   let navOpen = $state(false);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
+  function onAndroidBack(): void {
+    // 关闭栈里还有浮层（弹窗/抽屉/…）就只关最上层，否则真的退出应用
+    if (handleBack()) return;
+    void api.exitApp();
+  }
+
   onMount(() => {
     void gallery.init();
-    return () => void gallery.dispose();
+    // MainActivity 把全面屏返回手势转发成这个事件（桌面上没有，无副作用）
+    window.addEventListener("lc-android-back", onAndroidBack);
+    return () => {
+      void gallery.dispose();
+      window.removeEventListener("lc-android-back", onAndroidBack);
+    };
   });
 
   // 换筛选维度后自动收起抽屉（手机上点完侧栏就该回到内容）
   $effect(() => {
     void gallery.selection;
     navOpen = false;
+  });
+
+  // 抽屉开着时接住系统返回：按返回先收抽屉，而不是退出应用
+  $effect(() => {
+    if (!navOpen) return;
+    return registerBackCloser(() => (navOpen = false));
   });
 
   // 操作结果提示 3 秒后自动消失
@@ -92,7 +113,11 @@
 {/if}
 
 {#if gallery.error || gallery.notice}
-  <div class="pointer-events-none fixed bottom-4 left-1/2 z-60 -translate-x-1/2">
+  <!-- bottom 加 safe-area：全面屏手势条别压住提示 -->
+  <div
+    class="pointer-events-none fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] left-1/2 z-60 -translate-x-1/2"
+    transition:fly={{ y: 40, duration: 220, easing: cubicOut }}
+  >
     {#if gallery.error}
       <div
         class="pointer-events-auto flex max-w-2xl items-start gap-3 rounded-lg border border-rose-900/60

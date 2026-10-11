@@ -236,6 +236,8 @@ export interface MetaBatch {
   fetched: number;
   missing: number;
   failed: number;
+  /** 最后一条失败的原始原因（网络 / 代理），界面上跟着「失败 N」一起显示 */
+  lastError?: string;
   /** 连续失败过多而提前中止（通常是代理没开） */
   aborted: boolean;
   /** 中止的原因是**被限流**，而不是网络不通。界面上要提示「过一阵再来」。 */
