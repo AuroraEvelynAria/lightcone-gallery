@@ -6,8 +6,9 @@
 界面走「机箱陈列」式的工业配色。检视弹窗是一套纯 CSS 的三层光锥视差：没有 Three.js，
 没有 WebGL，`transform-style: preserve-3d` 加几层 Z 轴就够了。
 
-> **发行状态**：桌面（Windows）现在就能打包出安装包；**Android 端尚未适配** ——
-> 差的不是一条命令，是文件访问模型，详见 [docs/RELEASE.md](docs/RELEASE.md#二android)。
+> **发行状态**：桌面（Windows）现在就能打包出安装包；**Android 也已在真机跑通**
+> （Redmi K70 Ultra / HyperOS 实测：SAF 选目录 → 扫描 → 缩略图 → 检视弹窗 → 标签展示）。
+> 移动端怎么绕开分区存储、以及踩过的坑，见 [docs/RELEASE.md](docs/RELEASE.md#二android)。
 
 ## 能做什么
 
@@ -63,6 +64,11 @@
 - **Windows**：Visual Studio Build Tools（含 MSVC v143+ 与 Windows SDK）、WebView2 Runtime
 - **macOS**：Xcode Command Line Tools
 - **Linux**：`webkit2gtk-4.1`、`libappindicator3`、`librsvg2` 等
+- **Android**（只在要打移动端包时才需要）：Android SDK（platform 36 + build-tools 37）、
+  NDK `29.0.13846066`、CMake 3.22.1、JDK 17+，以及四个 `*-linux-android` Rust target。
+  **还必须把 `ANDROID_HOME` 指向 SDK 根目录** —— Tauri CLI 只认这个环境变量，
+  `local.properties` 顶不上（实测确认）。本机的 SDK 在 `F:\Android\Sdk`，
+  不在默认的 `%LOCALAPPDATA%\Android\Sdk`。
 
 首次运行 `npm run tauri:dev` 要编译约 560 个 crate（`Cargo.lock` 里的包数，含 `reqwest`
 带来的 TLS 依赖树），耗时较长；之后走增量缓存。
@@ -117,6 +123,7 @@ cd src-tauri && cargo test   # 后端测试
 │  │  ├─ virtualGeometry.ts      # 定高网格的几何推导（纯函数，可脱离浏览器测）
 │  │  ├─ thumbnailQueue.ts       # 缩略图请求的并发闸门
 │  │  ├─ format.ts               # 展示层格式化
+│  │  ├─ backStack.svelte.ts     # Android 返回手势的关闭栈（弹窗 → 抽屉 → 才轮到退出）
 │  │  └─ components/
 │  │     ├─ Sidebar.svelte       # 图库 / 相册 / 标签导航
 │  │     ├─ Toolbar.svelte       # 搜索、排序、扫描
@@ -167,6 +174,7 @@ cd src-tauri && cargo test   # 后端测试
          ├─ albums.rs
          ├─ tags.rs
          ├─ artworks.rs          # 阶段一 / 二：作品扫描、分页、缩略图
+         ├─ media.rs             # Android 桥命令：沉浸式 / SAF 选目录 / 保活服务 / 子目录列举
          └─ system.rs
 ```
 
@@ -191,12 +199,27 @@ npm run tauri:build
 # 产物：src-tauri/target/release/bundle/msi/*.msi 与 bundle/nsis/*-setup.exe
 ```
 
-打包前要补的配置、代码签名、自动更新，以及**Android 端需要先做什么**，
-都写在 [docs/RELEASE.md](docs/RELEASE.md) 里。一句话概括 Android：本机工具链全缺
-（SDK / NDK / CMake / 合适的 JDK / 四个 Rust target），而且 `tauri-plugin-dialog`
-在 Android 上不支持目录选择、返回的是 `content://` URI —— 现在这套
-「选目录 → walkdir → `std::fs` → `asset://`」的链路在 Android 上跑不通，
-得先决定走「侧载 + 所有文件访问」还是「SAF 重写」。
+打包前要补的配置、代码签名、自动更新，都写在 [docs/RELEASE.md](docs/RELEASE.md) 里。
+
+**Android**：
+
+```bash
+npm run tauri -- android build --target aarch64 --debug
+# 产物：src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+```
+
+两个容易踩的点：
+
+- **`ANDROID_HOME` 必须指向 SDK 根**（本机 `F:\Android\Sdk`）。没设它时 Tauri CLI 会报
+  「Android SDK not found」并去 `%LOCALAPPDATA%\Android\Sdk` 找 —— 本机那个路径下
+  只有一个**空目录**，看到它别误判成「SDK 没装」。
+- **`src-tauri/gen/android/local-maven/` 里那份 19KB 的 `rustls-platform-verifier` AAR
+  要跟着仓库走**。Android 上 `reqwest` 靠它做系统证书校验，缺了会在运行时报
+  「failed to call native verifier」（编译期完全看不出来）。
+
+debug APK 有 700MB 是正常的：Rust 调试符号没剥离，单个
+`lib/arm64-v8a/liblightcone_gallery_lib.so` 就 354MB。release + strip 会小一个量级，
+**别拿 debug 包发给别人装**。
 
 ## 文档
 

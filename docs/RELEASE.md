@@ -1,22 +1,25 @@
 # 发行清单
 
-两条发行线：**桌面（Windows）** 与 **Android**。桌面那条差的是「打包前的配置」；
-Android 那条差的是**工具链 + 文件访问模型** —— 不是换一条命令就能出包。
+两条发行线：**桌面（Windows）** 与 **Android**。桌面那条差的是「打包前的配置」
+（签名、安装器元数据）；Android 那条的**工具链与文件访问模型都已落地**，
+真机能跑通全流程，剩下的是签名与上架相关的收尾。
 
-下面所有「现状」都是 2026-10-10 在本机核对过的（看的是 `tauri.conf.json`、依赖树、
-以及 Tauri CLI 二进制里内嵌的 Android 模板），不是照抄官方文档。
+下面所有「现状」都在本机核对过（看的是 `tauri.conf.json`、依赖树、以及 Tauri CLI
+二进制里内嵌的 Android 模板），不是照抄官方文档。Android 一列已按 **2026-10-12
+真机结果**更新 —— 文中仍留着几段当时的设计推演，它们记录了「为什么最后选了
+这条路」，不要当成待办。
 
 ## 现状一览
 
 | 项 | 桌面（Windows） | Android |
 | --- | --- | --- |
-| 工具链 | ✅ rustc 1.99 + MSVC + Windows SDK + WebView2 | ❌ 无 `ANDROID_HOME`、无 SDK、无 NDK、无 CMake |
-| Rust target | ✅ `x86_64-pc-windows-msvc` | ❌ 四个 android target 都没装 |
-| JDK | 不适用 | ⚠️ 本机 JDK 25；模板用的是 Gradle 9.6.1 + AGP 9.3.1 |
+| 工具链 | ✅ rustc 1.99 + MSVC + Windows SDK + WebView2 | ✅ SDK `F:\Android\Sdk` + NDK 29 + CMake 3.22.1 + zulu-24；`ANDROID_HOME` 已写进用户环境变量 |
+| Rust target | ✅ `x86_64-pc-windows-msvc` | ✅ 四个 android target 全装 |
+| JDK | 不适用 | ✅ zulu-24 跑通 Gradle 9.6.1 + AGP 9.3.1 |
 | 移动端入口 | — | ✅ `mobile_entry_point` 与 `crate-type` 已就位 |
-| 原生依赖 | ✅ | ⚠️ `aws-lc-sys` 要 CMake；SQLite / libwebp 走 `cc` 无碍 |
-| 文件访问 | ✅ 路径式（walkdir + `std::fs` + `asset://`） | ❌ 分区存储，且插件在 Android 上不支持选目录 |
-| 触摸交互 | — | ❌ 需要捏合缩放与单指拖动 |
+| 原生依赖 | ✅ | ✅ `aws-lc-sys` 的 CMake 已装；SQLite / libwebp 走 `cc` 无碍 |
+| 文件访问 | ✅ 路径式（walkdir + `std::fs` + `asset://`） | ✅ 自研 Kotlin 桥走 SAF 选目录、拿回物理路径，之后复用同一套管线 |
+| 触摸交互 | — | ✅ 捏合缩放 / 单指拖动 / 陀螺仪视差 / 返回手势关闭栈 |
 | 图标 | ✅ `src-tauri/icons/` 全套 | ⚠️ 需 `tauri icon` 生成 mipmap |
 | 签名 | ⚠️ 无证书，SmartScreen 会拦 | ⚠️ 无 keystore |
 | LICENSE | ❌ 文件缺失（`package.json` 已声明 MIT） | 同左 |
@@ -146,9 +149,9 @@ walkdir，Android 走 MediaStore 桥）**。SQLite、虚拟滚动、分块缓存
 - **SAF 全重写**：树 URI + `ContentResolver` 全链路。为「任选任意目录」这种
   本应用不需要的能力付出最大代价——弃为备选。
 
-### 2. 装工具链（本机全缺）
+### 2. 工具链（已装齐）
 
-需要的东西（括号里是本机现状）：
+需要的东西与本机现状（2026-10-11 装齐，2026-10-12 复核）：
 
 | 组件 | 要求 | 本机（2026-10-11 实测已装齐） |
 | --- | --- | --- |
@@ -188,6 +191,21 @@ sdkmanager "cmake;3.22.1"
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 ```
 
+**`ANDROID_HOME` 是硬要求，别指望 `local.properties`**（2026-10-12 实测）：
+只写 `gen/android/local.properties` 里的 `sdk.dir` 时，`tauri android build` 依然会报
+
+```
+Info ANDROID_HOME not set, trying to locate Android SDK...
+Info Using installed Android SDK: C:\Users\NachoNeko\AppData\Local\Android\Sdk
+failed to ensure Android environment: ...
+```
+
+Tauri CLI 自己那层环境探测只认 `ANDROID_HOME` / `ANDROID_SDK_ROOT` 环境变量，
+`local.properties` 是给 Gradle 用的、救不了它。本机已用
+`setx ANDROID_HOME "F:\Android\Sdk"`（连同 `ANDROID_SDK_ROOT`）写进用户环境变量，
+**新开的终端**才生效。顺带记一笔：`%LOCALAPPDATA%\Android\Sdk` 下确实有个同名空目录，
+它是 CLI 探测时留下的壳子，别把它当成「SDK 装到 C 盘去了」或者「SDK 没装」。
+
 ### 3. 初始化与首次构建
 
 ```bash
@@ -201,7 +219,26 @@ npm run tauri -- android build --aab   # 出 AAB（上架 Play 用）
 `app/build/`、`.gradle/`、`local.properties`、keystore 不该提交 ——
 `tauri android init` 会自带一份 `.gitignore`，核对一下再提交。
 
-### 4. 触摸交互
+两个例外要留意：`local-maven/`（那份 rustls AAR，见第 5 节，**必须提交**）
+和 `local.properties`（机器相关，**必须忽略** —— 它现在的角色只是给 Gradle 兜底，
+真正让 Tauri CLI 找到 SDK 的是 `ANDROID_HOME`）。
+
+### 4. 触摸交互（已实现）
+
+**2026-10-12 真机跑通**，实际做法与下面推演有两处出入，记一笔免得下次重新推：
+
+- **视差走陀螺仪，但要用 `deviceorientation` 而不是 `GravitySensor`。** Generic Sensor API
+  的 `GravitySensor` 在 K70 Ultra 的 WebView 里**构造器存在、却永远不发读数**——
+  只靠 `typeof GravitySensor !== "undefined"` 判断会挑中一条死管线。现在的做法是两条
+  管线都起，700ms 内没等到有效读数（`null`，或三轴幅值 < 0.5）就回退到
+  `deviceorientation`（实测约 36Hz，够用）。
+- **返回键**在 `MainActivity` 挂 `OnBackPressedCallback`，向前端派发 `lc-android-back`
+  事件；前端 `backStack.svelte.ts` 维护一个关闭栈（检视弹窗 → 筛选抽屉 → …），
+  栈空了才调 `exit_app` 真退出。**别让系统默认行为接管**——那会直接退出应用。
+- **全屏**走 `WindowCompat.getInsetsController` 隐藏状态栏与手势条（`android_immersive`），
+  配合 `enableEdgeToEdge` + CSS `env(safe-area-inset-*)` 补安全区内边距。
+
+下面这段是当时的设计推演，保留作背景：
 
 `ImageViewer.svelte` 现在靠三样鼠标专属的东西：滚轮缩放（`onwheel`）、
 指针悬停更新 3D 倾斜（`onpointermove`）、指针捕获拖拽。Android 上前两样都不存在：
@@ -233,6 +270,33 @@ Android 上直接用系统证书库）。唯一的额外要求就是上面那张
 所以**不会自动走系统代理**。手机上的 Clash 一般开在局域网端口，让用户在
 「元数据」栏手填 `http://<电脑IP>:7897` 即可 —— 桌面版已经是这个交互。
 
+#### 2026-10-12：Android 上真正跑通联网踩到的三层
+
+**第一层，`rustls-platform-verifier` 在 Android 上不会自己初始化。** 编译期一切正常，
+运行时第一条 HTTPS 请求就 panic：
+
+```
+Expect rustls-platform-verifier to be initialized
+```
+
+它需要一个 JNI `Context`。两边都得做：Rust 侧在 `setup()` 里取
+`ndk_context::android_context()` 再调 `rustls_platform_verifier::android::init_with_env(env, context)`；
+Gradle 侧必须把它的 Kotlin 组件也打进去（`org.rustls:rustls-platform-verifier:0.2.0`），
+缺了会退化成 `failed to call native verifier`。本机把它放在
+`src-tauri/gen/android/local-maven/`（19KB，**要提交进仓库**）—— 当初是从 ghproxy
+镜像下的，上游仓库国内直连不稳。
+
+**第二层，MIUI / HyperOS 会在应用退到后台时掐网。** 系统给 uid 打上
+`netpolicy blocked=APP_BACKGROUND`，表现是「切出去看一眼，回来全超时」。
+现在的对策是元数据补全期间挂一个前台服务（`MetaKeepAliveService`：通知栏常驻 +
+`WifiLock` + `PARTIAL_WAKE_LOCK`），跑完立刻撤。
+
+**第三层，剩下的就真的是节点问题了。** 拿电脑 `curl` 交叉验证过：同一时刻
+pixiv 间歇性失败而 baidu 正常，说明是代理节点在抖，不是应用的问题。所以
+`pixiv.rs` 里的错误链会一路展开到最底层原因，并在节点类错误后面补一句
+「代理的节点连不上 Pixiv，去代理软件里换一个节点试试」——不然用户只会看到
+一句 `operation timed out`，根本无从下手。
+
 ### 6. 签名与产物
 
 ```bash
@@ -263,4 +327,6 @@ npm run check                  # svelte-check
 - [ ] 安装器语言设成中文（NSIS `SimpChinese` / WiX `zh-CN`）
 - [ ] `windows.wix.upgradeCode` 显式写死
 - [ ] 装机实测一遍：添加图库 → 扫描 → 缩略图 → 弹窗原图 → 复制图片 → 全屏 → 外观切换
-- [ ] Android 额外：`MANAGE_EXTERNAL_STORAGE` 声明、捏合缩放、返回键、keystore 不进仓库
+- [ ] Android 额外：keystore 不进仓库、`local.properties` 不被提交、`local-maven/` 被提交
+- [x] Android 交互（2026-10-12 真机验证）：SAF 选目录、捏合缩放、单指拖动、返回手势、全屏沉浸
+- [x] Android 联网（2026-10-12 真机验证）：rustls JNI 初始化 + 保活服务，元数据补全可跑
