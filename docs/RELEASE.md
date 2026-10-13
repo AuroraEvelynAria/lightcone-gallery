@@ -5,9 +5,9 @@
 真机能跑通全流程，剩下的是签名与上架相关的收尾。
 
 下面所有「现状」都在本机核对过（看的是 `tauri.conf.json`、依赖树、以及 Tauri CLI
-二进制里内嵌的 Android 模板），不是照抄官方文档。Android 一列已按 **2026-10-12
-真机结果**更新 —— 文中仍留着几段当时的设计推演，它们记录了「为什么最后选了
-这条路」，不要当成待办。
+二进制里内嵌的 Android 模板），不是照抄官方文档。Android 一列已按 **2026-10-14
+真机结果**更新（这一轮把 release 包签名、R8 keep 规则、NDK_HOME 的必填都验过了）——
+文中仍留着几段当时的设计推演，它们记录了「为什么最后选了这条路」，不要当成待办。
 
 ## 现状一览
 
@@ -20,7 +20,7 @@
 | 原生依赖 | ✅ | ✅ `aws-lc-sys` 的 CMake 已装；SQLite / libwebp 走 `cc` 无碍 |
 | 文件访问 | ✅ 路径式（walkdir + `std::fs` + `asset://`） | ✅ 自研 Kotlin 桥走 SAF 选目录、拿回物理路径，之后复用同一套管线 |
 | 触摸交互 | — | ✅ 捏合缩放 / 单指拖动 / 陀螺仪视差 / 返回手势关闭栈 |
-| 图标 | ✅ `src-tauri/icons/` 全套 | ⚠️ 需 `tauri icon` 生成 mipmap |
+| 图标 | ⚠️ 文件全套，但**内容都是 Tauri 默认 logo** | ⚠️ mipmap 已生成（5 个密度齐全，同样是默认 logo）；换图标要拿新图重跑 `tauri icon` |
 | 签名 | ⚠️ 无证书，SmartScreen 会拦 | ✅ 已配（走调试密钥库，release 可直接覆盖升级 debug 包） |
 | LICENSE | ❌ 文件缺失（`package.json` 已声明 MIT） | 同左 |
 
@@ -233,7 +233,7 @@ npm run tauri -- android build --aab   # 出 AAB（上架 Play 用）
   管线都起，700ms 内没等到有效读数（`null`，或三轴幅值 < 0.5）就回退到
   `deviceorientation`（实测约 36Hz，够用）。
 - **返回键**在 `MainActivity` 挂 `OnBackPressedCallback`，向前端派发 `lc-android-back`
-  事件；前端 `backStack.svelte.ts` 维护一个关闭栈（检视弹窗 → 筛选抽屉 → …），
+  事件；前端 `backStack.svelte.ts` 维护一个关闭栈（检视弹窗 → 筛选面板 → …），
   栈空了才调 `exit_app` 真退出。**别让系统默认行为接管**——那会直接退出应用。
 - **全屏**走 `WindowCompat.getInsetsController` 隐藏状态栏与手势条（`android_immersive`），
   配合 `enableEdgeToEdge` + CSS `env(safe-area-inset-*)` 补安全区内边距。

@@ -110,9 +110,12 @@
 | 标签 | `list_tags` `create_tag` `update_tag` `delete_tag` `add_tag_to_image` `remove_tag_from_image` |
 | 系统 | `library_stats` `thumbnail_cache_usage` `clear_thumbnail_cache` |
 | 外观（阶段三） | `set_window_material` `load_settings` `save_settings` |
-| 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `thumbnail_for_artwork` `remove_artworks` `count_ignored_artworks` `clear_ignored_artworks` |
+| 作品（阶段一 / 二 / 四） | `scan_artworks_folder` `list_artworks` `list_artwork_aspects` `thumbnail_for_artwork` `remove_artworks` `count_ignored_artworks` `clear_ignored_artworks` |
 | 画师 | `list_artists` |
-| Pixiv 元数据 | `illust_detail` `count_missing_meta` `fetch_missing_meta` `list_pixiv_tags` `pixiv_meta_stats` |
+| Pixiv 元数据 | `illust_detail` `count_missing_meta` `fetch_missing_meta` `fetch_all_meta` `stop_meta_fetch` `reset_missing_meta` `list_pixiv_tags` `pixiv_meta_stats` |
+| 标签图库（v10） | `list_tag_galleries` `create_tag_gallery` `delete_tag_gallery` `count_artworks_by_rating` |
+| 壁纸 | `set_wallpaper` |
+| Android 原生桥 | `android_pick_directory` `android_list_subdirs` `android_scan_media_store` `android_check_media_permission` `android_request_media_permission` `android_keep_alive` `android_immersive` `android_restore_db` `copy_image_to_clipboard` `exit_app` |
 
 扫描期间后端通过 `scan://progress` 事件推送进度（发现阶段 + 索引阶段），前端在 `gallery.svelte.ts` 中订阅。
 
@@ -212,8 +215,9 @@
 - **弹窗翻页只覆盖「已加载」的范围**：通用图库那边翻到已加载列表的边界会自动 `loadMore()` 再翻，但一次只补一页；作品库那边靠 `artworks.fetchAt()` 等数据块到位，等不到就原地不动（不会切到空白）。两边都不做相邻原图预加载 —— 项目的硬约束是「原图只在弹窗里出现」，预加载等于把没在看的原图也拉进内存。
 - **移除的「反悔」是整表清空，不是逐条撤销**：移除会把 `(pid, page)` 记进 `ignored_artworks`，所以重扫不会收回来；但想撤销只能清空整份名单（作品库页头的「已忽略 N 条 · 清空」），没有逐条恢复。名单通常很小，暂不值得为它做一套管理界面。
 - **作品库不刷新已移动文件的路径**：`scan_artworks_folder` 用 `ON CONFLICT DO NOTHING` 实现去重（这也让 `duplicates` 计数能如实反映去重效果），代价是文件被移动后 `original_path` 仍指向旧位置，缩略图会随之变成「源文件缺失」。若要自动刷新，把冲突分支改成 `DO UPDATE SET original_path = excluded.original_path`，但那样就分不清「新增」和「更新」了。
-- **作品库只能扫「目录」，不能复用已登记的图库**：`artworks` 是独立索引，只有通过作品库页面的「选择文件夹并扫描」明确扫过的目录才会进去；侧栏「添加图库」登记的是通用图库（`images` 表）。同一个目录两边都索引会存两份缩略图（320px + 640px）。要合并成一套需要给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
 - **扫描是单线程的**：`scanner.rs`（通用图库）顺序遍历；作品库那边的**缩略图生成**已经并行（见 `ensure_parallel`），但目录遍历本身仍是串行。目录很大时可引入 `rayon` 并行读取元数据，注意 SQLite 写入仍需串行。
 - **CSP 当前关闭**：`tauri.conf.json` 中 `security.csp` 为 `null` 以便开发；发布前应配置严格 CSP，并把 `asset:` 加入 `img-src`。
 - **移除图库不会清理缩略图缓存**：缓存可能残留孤儿文件。侧栏底部显示缓存占用，旁边的「清理」按钮调用 `clear_thumbnail_cache` 一次性清空（作品库下次浏览会按需重建）。
-- **作品库与通用图库是两套索引**：同一个目录既可以被「添加图库」索引进 `images`，也可以被「作品库扫描」索引进 `artworks`，两边的元数据不共享。若后续要合并成一套，需要决定是否给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
+- **作品库与通用图库是两套并存的索引**：同一个目录既可以被「添加图库」索引进 `images`，也可以被「作品库扫描」索引进 `artworks`（只有明确扫过的目录才进得去），两边元数据不共享、**缩略图也要存两份**（320px + 640px）。合并成一套需要给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
+- **`surface-900 / 850 / 950` 是半透明的**（`color-mix(..., alpha%, transparent)` 出来的，为了透出窗口材质）。铺在 `body` 上当页面底色没问题，但**浮层一旦盖在内容上，底下的文字会直接透过来看得见**。这个坑难查的地方在于**层级完全是对的** —— `elementsFromPoint` 查出来浮层就在最上面，第一反应会去查 z-index / 堆叠上下文，方向全错；而且 `bg-surface-900/95` **不是解法**，那是在 0.66 的基础上再乘 0.95，比原来还透。浮层一律用 `app.css` 里的 `.floating-panel`（取不带 alpha 的 `--tone-panel`）。
+- **给容器加动效前先确认它里面没有 `fixed` 后代**：`transform` / `filter` / `backdrop-filter` / `contain` 都会把元素变成**固定定位的包含块**，其后代里所有 `position: fixed` 的浮层会改为相对它定位、整块跑到屏幕中间。所以视图切换那层只敢用 `opacity`（只建栈上下文，不建包含块），而排版切换那层才敢用位移 —— 因为网格容器里没有 `fixed` 后代，浮层都是它的兄弟节点。

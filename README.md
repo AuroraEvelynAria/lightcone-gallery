@@ -206,7 +206,8 @@ cd src-tauri && cargo test   # 后端测试
 │  └─ masonry-geometry.test.ts   # 瀑布流几何自检（npm test）
 ├─ docs/
 │  ├─ DESIGN-NOTES.md            # 数据库设计、命令清单、实现说明与踩过的坑
-│  └─ RELEASE.md                 # 桌面 + Android 发行清单
+│  ├─ RELEASE.md                 # 桌面 + Android 发行清单
+│  └─ SYNC.md                    # 跨设备同步的设计（参考 Resilio Sync，尚未实现）
 └─ src-tauri/                    # Rust 后端
    ├─ Cargo.toml
    ├─ tauri.conf.json
@@ -306,6 +307,7 @@ npm run tauri -- android build --target aarch64 --debug    # debug，~700MB，�
 | --- | --- |
 | [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md) | 数据库每一版的来由、后端命令一览、关键实现说明、完整的已知限制清单 |
 | [docs/RELEASE.md](docs/RELEASE.md) | 桌面与 Android 的发行清单 |
+| [docs/SYNC.md](docs/SYNC.md) | 跨设备同步（共用收藏 / 元数据互通）的设计：配对与加密、发现、合并规则、分三期的计划。**尚未实现**，先把结论写下来免得重新推一遍 |
 | `HANDOFF.md` / `HANDOFF-PHASE1.md` | 开发过程中的交接笔记（内部资料，`HANDOFF-PHASE1` 已过期） |
 
 ## 值得先知道的几条限制
@@ -345,7 +347,7 @@ npm run tauri -- android build --target aarch64 --debug    # debug，~700MB，�
 - **作品库与通用图库是两套并存的索引**：同一个目录两边都索引会存两份缩略图，
   合并需要给 `images` 加 `pid` / `page` 列并废弃 `artworks` 表。
 
-完整的三十来条（含每条的对策与扩展点）在
+完整清单（含每条的对策与扩展点）在
 [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md#已知限制与扩展点)。
 
 ## 许可
