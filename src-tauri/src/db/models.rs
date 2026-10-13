@@ -362,6 +362,44 @@ pub struct ArtworkPage {
     pub limit: i64,
 }
 
+/// 瀑布流排版要用的「这一张作品有多高」。
+///
+/// 只送 `id` 与比例、不送原始像素宽高：排版的输入本来就只有比例，送像素既没用
+/// 又让载荷翻倍（4430 条约 70KB vs 130KB）。带上 `id` 是为了让前端能校验
+/// 「这份比例表与当前列表是不是同一批」—— 光靠下标对齐太脆。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtworkAspect {
+    pub id: i64,
+    /// 高 / 宽。卡片高度 = 列宽 × 这个值。
+    pub aspect: f64,
+}
+
+/// 分级的取值域。写成常量是为了让「-1 是不限」这件事只有一个出处 ——
+/// SQL 拼装、前端默认值、命令参数校验都读它。
+pub const RATING_ANY: i64 = -1;
+pub const RATING_ALL_AGES: i64 = 0;
+pub const RATING_NSFW: i64 = 1;
+
+/// 侧栏里的一条「标签图库」：一组标签 + 一个分级，点它就按这组条件筛作品。
+///
+/// 存在的理由是把 NSFW 从日常浏览里分出去（见 `schema::MIGRATION_V10`）。
+/// 侧栏里内置的「全年龄 / R-18」两条**不是**数据库里的行 —— 它们是前端按同一套
+/// 条件直接拼出来的，只有用户自建的才落库。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TagGallery {
+    pub id: i64,
+    pub name: String,
+    /// 标签，多个是「同时包含」——与作品库筛选面板的语义一致
+    pub tags: Vec<String>,
+    /// 分级：`-1` 不限 / `0` 全年龄 / `1` R-18 及以上
+    pub rating: i64,
+    pub created_at: i64,
+    /// 命中条数，查询时实时算出来（作品库会增删，存下来必然过期）
+    pub count: i64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtworkScanSummary {

@@ -22,6 +22,18 @@
   /** 回退失败的那一条 id。 */
   let failedId = $state<number | null>(null);
 
+  /**
+   * 已经画出像素的那一条 id。
+   *
+   * 按 id 记账而不是靠 effect 重置：虚拟滚动会复用组件实例，id 一变上一张的
+   * 「已画好」自然就不匹配了 —— 与 `recovered` / `failedId` 同一套理由。
+   *
+   * 用 CSS 过渡而不是 Svelte `transition:`：虚拟滚动下每滚一屏都会新建十几个
+   * `<img>`，Svelte 过渡每次都要跑一遍 JS 调度；而这里只需一次 opacity 补间，
+   * 交给合成器最省。淡入也只动 opacity —— 滚动时不会因为动画掉帧。
+   */
+  let paintedId = $state<number | null>(null);
+
   let source = $derived(
     recovered?.id === artwork.id
       ? recovered.src
@@ -66,7 +78,10 @@
       loading="lazy"
       decoding="async"
       draggable="false"
-      class="h-full w-full object-cover"
+      class="h-full w-full object-cover transition-opacity duration-150 {paintedId === artwork.id
+        ? 'opacity-100'
+        : 'opacity-0'}"
+      onload={() => (paintedId = artwork.id)}
       onerror={() => void recover()}
     />
   {:else if isFailed}

@@ -21,7 +21,7 @@
 | 文件访问 | ✅ 路径式（walkdir + `std::fs` + `asset://`） | ✅ 自研 Kotlin 桥走 SAF 选目录、拿回物理路径，之后复用同一套管线 |
 | 触摸交互 | — | ✅ 捏合缩放 / 单指拖动 / 陀螺仪视差 / 返回手势关闭栈 |
 | 图标 | ✅ `src-tauri/icons/` 全套 | ⚠️ 需 `tauri icon` 生成 mipmap |
-| 签名 | ⚠️ 无证书，SmartScreen 会拦 | ⚠️ 无 keystore |
+| 签名 | ⚠️ 无证书，SmartScreen 会拦 | ✅ 已配（走调试密钥库，release 可直接覆盖升级 debug 包） |
 | LICENSE | ❌ 文件缺失（`package.json` 已声明 MIT） | 同左 |
 
 ---
@@ -299,14 +299,53 @@ pixiv 间歇性失败而 baidu 正常，说明是代理节点在抖，不是应�
 
 ### 6. 签名与产物
 
+**签名已经配好了**（2026-10-12）：`app/build.gradle.kts` 读 `gen/android/keystore.properties`
+（该文件被 gitignore，口令不进仓库），文件不存在时整块跳过 —— 于是 `assembleRelease`
+仍然能跑，只是产出一个装不上的 `-unsigned.apk`。
+
+现在那个文件指向 **Android 调试密钥库**（`~/.android/debug.keystore`），是刻意为之：
+
+| 做法 | 后果 |
+| --- | --- |
+| **调试密钥库**（当前） | release 包与一直装的 debug 包**签名相同**，可以**直接覆盖升级** —— 不用卸载，应用数据（索引 / 标签 / 元数据）全在 |
+| 自己 `keytool` 生成的新 keystore | 必须先**卸载**现有应用才能装（签名不同），而**卸载会清掉应用数据**。将来正式发行时走这条 |
+
 ```bash
-keytool -genkey -v -keystore lightcone.jks -keyalg RSA -keysize 2048 -validity 10000 -alias lightcone
+npm run tauri -- android build --target aarch64    # -> app-universal-release.apk（28MB，已签名）
 ```
 
-在 `gen/android/app/build.gradle.kts` 里配 `signingConfigs`（keystore 路径与口令走
-环境变量或 `keystore.properties`，**别写进仓库**）。Play 上架要 AAB，`versionCode`
-由 `bundle.android.versionCode` 决定，不填则按
+Play 上架要 AAB，`versionCode` 由 `bundle.android.versionCode` 决定，不填则按
 `major * 1000000 + minor * 1000 + patch` 从版本号换算。
+
+#### ★ release 专属陷阱：R8 会吃掉 Kotlin 桥
+
+Tauri 的 Android 插件全靠反射（按**类名字符串**建实例、按**方法名**匹配 `@Command`），
+R8 看不见这些引用，默认会把整个类删掉或改名。**debug 包不混淆，所以这个问题只在
+release 上出现**，而且表现为「扫描 / 选目录 / 沉浸式这些命令全部报找不到」。
+
+保护规则在 `media-store-bridge/consumer-rules.pro`。这个文件原先被
+`consumerProguardFiles("consumer-rules.pro")` 声明却**并不存在** —— 靠
+`gradle.properties` 里的 `android.proguard.failOnMissingFiles=false` 掩盖着，等于裸奔。
+
+改完务必验一次（只读，不用装机）：
+
+```bash
+"F:/Android/Sdk/cmdline-tools/latest/bin/apkanalyzer.bat" dex packages --defined-only \
+  src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk \
+  | grep lightcone
+# 期望看到 com.lightcone.gallery.media.MediaStoreBridge 以及 pickDirectory / keepAlive /
+# listBuckets / immersive / copyToCache / listPixivImages / checkPermissions / directoryCallback
+```
+
+#### 体积：28MB vs 700MB
+
+| 构建 | 体积 | 原因 |
+| --- | --- | --- |
+| release | **28MB** | `strip = true` + LTO + `panic=abort`，Rust `.so` 只剩 27.9MB |
+| debug | 360–720MB | debug 构建类型显式要求 `jniLibs.keepDebugSymbols`，`.so` 不剥离符号（354MB）；打包偶尔还在它前面留一段等长的零字节预留区，于是文件 718MB 而 `unzip -l` 的内容总和只有 362MB |
+
+**只有 debuggable 的包才开 `webview_devtools_remote`** —— 需要用 Chrome DevTools 连
+WebView 调试时必须装 debug 包，日常用 release。
 
 图标：`tauri icon src-tauri/icons/icon.png` 会一并生成 Android 的 mipmap 各密度版本。
 
@@ -327,6 +366,7 @@ npm run check                  # svelte-check
 - [ ] 安装器语言设成中文（NSIS `SimpChinese` / WiX `zh-CN`）
 - [ ] `windows.wix.upgradeCode` 显式写死
 - [ ] 装机实测一遍：添加图库 → 扫描 → 缩略图 → 弹窗原图 → 复制图片 → 全屏 → 外观切换
-- [ ] Android 额外：keystore 不进仓库、`local.properties` 不被提交、`local-maven/` 被提交
+- [ ] Android 额外：`keystore.properties` 与 `local.properties` 不被提交、`local-maven/` 被提交
+- [ ] Android release：R8 之后用 `apkanalyzer dex packages` 确认 `MediaStoreBridge` 的命令方法还在
 - [x] Android 交互（2026-10-12 真机验证）：SAF 选目录、捏合缩放、单指拖动、返回手势、全屏沉浸
 - [x] Android 联网（2026-10-12 真机验证）：rustls JNI 初始化 + 保活服务，元数据补全可跑

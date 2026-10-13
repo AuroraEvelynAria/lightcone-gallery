@@ -17,6 +17,8 @@
   let element = $state<HTMLElement | null>(null);
   let source = $state<string | null>(null);
   let failed = $state(false);
+  /** 已经画出像素的那一条 id；按 id 记账，实例被复用去渲染别的图时自动失效。 */
+  let paintedId = $state<number | null>(null);
 
   // 非响应式标记：记录当前正在请求 / 已经取到的是哪一条
   let requestedId: number | null = null;
@@ -85,7 +87,10 @@
       loading="lazy"
       decoding="async"
       draggable="false"
-      class="h-full w-full object-cover"
+      class="h-full w-full object-cover transition-opacity duration-150 {paintedId === id
+        ? 'opacity-100'
+        : 'opacity-0'}"
+      onload={() => (paintedId = id)}
       onerror={() => (failed = true)}
     />
   {:else if failed}

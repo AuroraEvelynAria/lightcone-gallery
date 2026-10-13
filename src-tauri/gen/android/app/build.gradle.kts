@@ -47,6 +47,31 @@ android {
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
+    /**
+     * release 的签名配置，从 `gen/android/keystore.properties` 读（该文件被 .gitignore
+     * 忽略，口令绝不进仓库）。文件不存在时整块跳过 —— 于是 `assembleRelease` 仍然能跑，
+     * 只是产出一个装不上的 `-unsigned.apk`。
+     *
+     * 本机现在指向 **Android 调试密钥库**（`~/.android/debug.keystore`）。这是刻意的：
+     * release 包和之前一直装的 debug 包**签名相同**，可以直接覆盖升级，不用卸载 ——
+     * 卸载会连带清掉应用数据，手机里那套索引和元数据就没了。
+     *
+     * 将来要正式发行时换成自己的 keystore 即可，代价是必须先从手机上卸载现有应用。
+     */
+    val keystoreProps = Properties().apply {
+        val propsFile = rootProject.file("keystore.properties")
+        if (propsFile.exists()) propsFile.inputStream().use { load(it) }
+    }
+    signingConfigs {
+        if (keystoreProps.isNotEmpty()) {
+            create("release") {
+                storeFile = file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
     buildTypes {
         getByName("debug") {
             manifestPlaceholders["usesCleartextTraffic"] = "true"
@@ -61,6 +86,9 @@ android {
             }
         }
         getByName("release") {
+            if (keystoreProps.isNotEmpty()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             optimization {
                enable = true
             }

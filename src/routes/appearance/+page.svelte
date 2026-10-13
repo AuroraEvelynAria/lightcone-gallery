@@ -5,14 +5,29 @@
    * 配色源自 RhinE（foobar2000 主题）的 5 套方案，另按主人反馈新增了 4 套；材质是 Tauri 的真实系统效果
    * （DWM Mica / Acrylic），不是 CSS 假模糊。切换即时生效，不需要重启。
    */
+  import { goto } from "$app/navigation";
+
+  import { registerBackCloser } from "$lib/backStack.svelte";
   import { theme } from "$lib/theme.svelte";
   import { findScheme, MATERIALS, SCHEMES, type SchemeId, type ThemeMode } from "$lib/themes";
 
   /** 手机上没有窗口材质这回事（WebView 背后没有 DWM），材质区整个收起。 */
   const isAndroid = navigator.userAgent.includes("Android");
 
+  // Android 全面屏返回手势：外观是独立路由，按返回该退回主界面，而不是退出
+  // 应用 —— 真机上一滑就回桌面，就是关闭栈里缺了「当前是子路由」这一层。
+  $effect(() => registerBackCloser(() => void goto("/")));
+
+  /**
+   * 明暗三态。文案跟着平台走 —— 手机上写「跟着 Windows 的设置走」是错的，
+   * 那边跟的是手机系统自己的浅色 / 深色开关。
+   */
   const MODES: { id: ThemeMode; name: string; note: string }[] = [
-    { id: "system", name: "跟随系统", note: "跟着 Windows 的浅色 / 深色设置走" },
+    {
+      id: "system",
+      name: "跟随系统",
+      note: isAndroid ? "跟着手机系统的浅色 / 深色设置走" : "跟着 Windows 的浅色 / 深色设置走",
+    },
     { id: "light", name: "浅色", note: "固定浅色，忽略系统设置" },
     { id: "dark", name: "深色", note: "固定深色，忽略系统设置" },
   ];
@@ -36,14 +51,19 @@
 </script>
 
 <div class="flex h-screen flex-col bg-surface-950 text-soft">
+  <!-- pt 补 safe-area：全面屏下这个独立路由的 header 会顶到状态栏底下 -->
   <header
-    class="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-5 py-3"
+    class="flex flex-wrap items-center gap-3 border-b border-surface-800 bg-surface-900 px-5 py-3
+           pt-[calc(0.75rem+env(safe-area-inset-top))]"
   >
     <div class="min-w-0">
       <h1 class="text-sm font-semibold text-fg">外观</h1>
       <p class="text-[11px] text-muted">
         配色 <span class="font-mono text-accent-400">{findScheme(theme.scheme).name}</span>
-        · 材质 <span class="font-mono text-accent-400">{theme.material}</span>
+        {#if !isAndroid}
+          <!-- 材质是 Windows 专属，手机上报一个 solid/acrylic 只会让人困惑 -->
+          · 材质 <span class="font-mono text-accent-400">{theme.material}</span>
+        {/if}
         · {theme.dark ? "深色" : "浅色"}
       </p>
     </div>
@@ -147,7 +167,9 @@
           <h2 class="font-mono text-[11px] font-semibold tracking-wide text-muted uppercase">
             明暗
           </h2>
-          <p class="text-[11px] text-mark">只影响配色，不影响材质本身的明暗</p>
+          <p class="text-[11px] text-mark">
+            {isAndroid ? "只影响配色" : "只影响配色，不影响材质本身的明暗"}
+          </p>
         </div>
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {#each MODES as mode (mode.id)}

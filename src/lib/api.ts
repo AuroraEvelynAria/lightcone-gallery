@@ -4,11 +4,12 @@
  * 约定：Rust 命令名用 snake_case，参数用 camelCase（Tauri 会自动转换命名风格）。
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 import type {
   Album,
   Artwork,
+  ArtworkAspect,
   ArtistSummary,
   ArtworkPage,
   ArtworkScanSummary,
@@ -22,14 +23,18 @@ import type {
   MetaBatch,
   MetaProgress,
   MetaStats,
+  RatingCounts,
   ScanProgress,
   ScanSummary,
   SortBy,
   Stats,
   Tag,
   TagCount,
+  TagGallery,
   ThumbnailProgress,
 } from "./types";
+// 常量要按值导入 —— `RATING_ANY` 会被当默认值用，`import type` 拿不到它
+import { RATING_ANY } from "./types";
 
 /** 扫描进度事件的频道名，与 Rust 端 `SCAN_PROGRESS_EVENT` 保持一致。 */
 export const SCAN_PROGRESS_EVENT = "scan://progress";
@@ -41,6 +46,39 @@ export const THUMBNAIL_PROGRESS_EVENT = "artworks://thumbnail-progress";
 export const META_PROGRESS_EVENT = "pixiv://meta-progress";
 
 export type { MetaProgress, ScanProgress, ThumbnailProgress };
+
+/**
+ * 冷启动竞态：Android 上 WebView 的 JS 会跑在 Rust `setup()` 托管 `AppState` 之前，
+ * 这时任何需要 `State` 的命令都会抛
+ * 「state not managed for field `state` on command `xxx`. You must call `.manage()`…」。
+ *
+ * 这不是调用方的错，等一下再试就好 —— 真机实测：**热重载页面一切正常，只有冷启动
+ * 会撞上**（冷启动时外观设置读不回来、界面上挂一条报错，就是它）。
+ *
+ * 只对这**一个**错误做有界重试，其余错误原样抛出：真正的故障不该被拖成两秒超时。
+ */
+const STATE_RACE_MARKER = "state not managed";
+const STATE_RACE_ATTEMPTS = 15;
+const STATE_RACE_DELAY_MS = 120;
+
+/**
+ * 与 `invoke` 同签名，只多一层冷启动重试。
+ *
+ * 故意沿用 `invoke` 这个名字：下面五十多处调用点一个字都不用改，
+ * 而「所有 IPC 都收口在这个文件」的约定也就自然保住了。
+ */
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await tauriInvoke<T>(cmd, args);
+    } catch (err) {
+      if (attempt >= STATE_RACE_ATTEMPTS || !String(err).includes(STATE_RACE_MARKER)) {
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, STATE_RACE_DELAY_MS));
+    }
+  }
+}
 
 export const api = {
   // ---- 图库 ---------------------------------------------------------------
@@ -153,14 +191,52 @@ export const api = {
   listArtworks: (
     offset = 0,
     limit = 60,
-    filters?: { artistUids?: string[]; pixivTags?: string[] },
+    filters?: { artistUids?: string[]; pixivTags?: string[]; rating?: number },
   ) =>
     invoke<ArtworkPage>("list_artworks", {
       offset,
       limit,
       artistUids: filters?.artistUids ?? [],
       pixivTags: filters?.pixivTags ?? [],
+      // -1 = 不限；0 = 全年龄；1 = R-18 及以上。默认值必须显式传，
+      // 后端把缺省当成「不限」只是为了兼容旧调用
+      rating: filters?.rating ?? RATING_ANY,
     }),
+  /**
+   * 读出当前筛选下**每一张**作品的宽高比，供瀑布流排版。
+   *
+   * 刻意不分页：瀑布流的总高 = 最高那一列有多高，拿不到全量就撑不准滚动条。
+   * 只送 id 与比例时 4430 条约 70KB，一次取完最省事。
+   *
+   * **首次调用会慢一点**：老库的宽高要现场量（读缩略图文件头，并行），量完写回库，
+   * 之后纯查表。量文件头在数据库锁之外跑，不会卡住同期的列表查询。
+   */
+  listArtworkAspects: (filters?: {
+    artistUids?: string[];
+    pixivTags?: string[];
+    rating?: number;
+  }) =>
+    invoke<ArtworkAspect[]>("list_artwork_aspects", {
+      artistUids: filters?.artistUids ?? [],
+      pixivTags: filters?.pixivTags ?? [],
+      rating: filters?.rating ?? RATING_ANY,
+    }),
+  // ---- 标签图库 -----------------------------------------------------------
+  /**
+   * 读出全部**自建**的标签图库，每条带实时命中的作品条数。
+   *
+   * 侧栏里内置的「全年龄 / R-18」两条不在这里 —— 它们就是 `rating` 一个维度，
+   * 由前端直接拼出来，不落库。
+   */
+  listTagGalleries: () => invoke<TagGallery[]>("list_tag_galleries"),
+  /** 新建一条。名字重复、标签与分级同时为空都会被后端拒绝并给出原因。 */
+  createTagGallery: (name: string, tags: string[], rating: number) =>
+    invoke<TagGallery>("create_tag_gallery", { name, tags, rating }),
+  /** 删掉一条。只是去掉侧栏入口，**作品一条都不动**。 */
+  deleteTagGallery: (id: number) => invoke<void>("delete_tag_gallery", { id }),
+  /** 数一数各分级下有多少条作品（侧栏两条内置图库的计数 + 「未抓元数据」提示）。 */
+  countArtworksByRating: () => invoke<RatingCounts>("count_artworks_by_rating"),
+
   /**
    * 重新生成作品缩略图并把新路径写回数据库。
    *
@@ -206,6 +282,18 @@ export const api = {
    * 而我们的图走自定义 `asset://` 协议，它取不到，点了没反应。
    */
   copyImage: (path: string) => invoke<void>("copy_image_to_clipboard", { path }),
+  /**
+   * 把一张图设为**桌面壁纸**。
+   *
+   * 两端实现完全不同：Windows 走 `SystemParametersInfoW`，Android 交给
+   * Kotlin 的 `WallpaperManager`。`target` **只对 Android 有意义**
+   * （`home` 默认 / `lock` / `both`）—— Windows 没有「锁屏壁纸」这个概念。
+   *
+   * 失败原因要**原样显示给用户**：格式不被系统接受、ROM 不给设锁屏，
+   * 这两种在两端都会遇到，静默失败会让人以为功能坏了。
+   */
+  setWallpaper: (path: string, target?: "home" | "lock" | "both") =>
+    invoke<void>("set_wallpaper", { path, target: target ?? null }),
   /** 叫停自动补全。最多再抓完当前这批就停。返回当时是否在跑。 */
   stopMetaFetch: () => invoke<boolean>("stop_meta_fetch"),
   /** 按标签统计，倒序。标签只能联网取到。 */

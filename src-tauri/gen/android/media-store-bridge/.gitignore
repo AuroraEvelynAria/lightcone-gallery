@@ -1,3 +1,9 @@
-consumer-rules.pro
+# 注意：**不要**把 consumer-rules.pro 加回来。
+#
+# 这份 .gitignore 是从 Android 库模板带过来的，模板里 consumer-rules.pro 是空样板，
+# 忽略掉无所谓；但在本模块里它**是必需品** —— Tauri 的插件桥全靠反射，没有这几条
+# keep 规则，R8 会在 release 包里把 MediaStoreBridge 整个删掉（debug 不混淆所以看不出来）。
+# 曾经因为这条忽略规则，「声明了 consumerProguardFiles 却根本没有这个文件」被
+# gradle.properties 的 android.proguard.failOnMissingFiles=false 一直掩盖着。
 proguard-rules.pro
 build

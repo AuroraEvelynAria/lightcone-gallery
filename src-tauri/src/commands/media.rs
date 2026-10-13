@@ -80,6 +80,28 @@ where
     .map_err(|err| AppError::Other(format!("桥任务失败: {err}")))?
 }
 
+/// 通过桥调用 Kotlin 命令，**带参数**（上面那个 `call_bridge` 只传 null）。
+///
+/// 与 `call_bridge` 同样是「克隆句柄 → 丢进阻塞线程池」：`run_mobile_plugin`
+/// 是同步 JNI 调用，直接 await 会占住 async runtime 的工作线程。
+#[cfg(target_os = "android")]
+pub(crate) async fn call_bridge_with(
+    app: &AppHandle,
+    command: &'static str,
+    payload: serde_json::Value,
+) -> AppResult<()> {
+    let bridge = app.state::<MediaBridge>();
+    let handle = bridge.handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        handle
+            .run_mobile_plugin::<serde_json::Value>(command, payload)
+            .map(|_| ())
+            .map_err(|err| AppError::Other(format!("Kotlin 桥调用失败: {err}")))
+    })
+    .await
+    .map_err(|err| AppError::Other(format!("桥任务失败: {err}")))?
+}
+
 /// 查询 MediaStore 权限状态（Android）。
 #[tauri::command]
 pub async fn android_check_media_permission(app: AppHandle) -> AppResult<PermissionResult> {

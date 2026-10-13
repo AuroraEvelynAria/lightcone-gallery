@@ -117,7 +117,8 @@
       src={convertFileSrc(artwork.originalPath)}
       alt={`${artwork.pid} p${artwork.page}`}
       failurePath={artwork.originalPath}
-      copyPath={artwork.originalPath}
+      ambientSrc={artwork.thumbnailPath ? convertFileSrc(artwork.thumbnailPath) : undefined}
+      originalPath={artwork.originalPath}
       {onclose}
       {onnavigate}
     >

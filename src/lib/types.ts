@@ -159,6 +159,57 @@ export interface ArtworkPage {
   limit: number;
 }
 
+/**
+ * 瀑布流排版要用的「这一张作品有多高」。
+ *
+ * 只带 `id` 与比例、不带原始像素宽高：排版的输入本来就只有比例。
+ * `id` 是给前端校验「这份比例表与当前列表是不是同一批」用的 ——
+ * 光靠下标对齐太脆，顺序一旦漂移就是「卡片的框和图错位」，还不报错。
+ */
+export interface ArtworkAspect {
+  id: number;
+  /** 高 / 宽。卡片高度 = 列宽 × 这个值。 */
+  aspect: number;
+}
+
+/**
+ * 分级的取值域，与 Rust 端 `db::models` 里的同名常量一一对应。
+ *
+ * 数据源是 `illust_meta.x_restrict`（Pixiv 官方分级：0 全年龄 / 1 R-18 / 2 R-18G），
+ * **不是**标签 —— 作者有没有打「R-18」这个标签不影响它。
+ *
+ * 注意第三种情况：**没抓过元数据的作品既不属于全年龄也不属于 R-18**，它是未知。
+ * 界面在选了分级之后要单独提示这类作品的条数，否则用户会以为作品丢了。
+ */
+export const RATING_ANY = -1;
+export const RATING_ALL_AGES = 0;
+export const RATING_NSFW = 1;
+
+/**
+ * 各分级下的作品**条数**（一条 = 作品的一页，与作品库列表的「共 N 条作品页」同口径）。
+ *
+ * 侧栏那两条内置图库要显示数量，而它们不落库，所以单独走一个命令数出来。
+ */
+export interface RatingCounts {
+  allAges: number;
+  nsfw: number;
+  /** 没抓过元数据的作品：既不是全年龄也不是 R-18 */
+  unknown: number;
+}
+
+/** 侧栏里的一条「标签图库」：一组标签 + 一个分级。 */
+export interface TagGallery {
+  id: number;
+  name: string;
+  /** 标签，多个是「同时包含」——与作品库筛选面板的语义一致 */
+  tags: string[];
+  /** 见上面的 RATING_* 常量 */
+  rating: number;
+  createdAt: number;
+  /** 命中条数，后端实时算出 */
+  count: number;
+}
+
 export interface ArtworkScanSummary {
   /** 目录里发现的图片文件总数 */
   discovered: number;
@@ -285,3 +336,10 @@ export interface IllustDetailView {
   createDate: string;
   tags: string[];
 }
+
+/**
+ * 筛选面板的形态。两种都留着供对比人机功效：
+ * - `sheet` 底部浮层：只占下半屏，一眼还能看见上面的图，拇指够得着
+ * - `drawer` 右侧抽屉：一屏放得下更多条件，但会挡住大半个列表
+ */
+export type FilterForm = "sheet" | "drawer";

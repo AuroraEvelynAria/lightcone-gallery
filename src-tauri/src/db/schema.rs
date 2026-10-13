@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::error::{AppError, AppResult};
 
 /// 当前 schema 版本，与下面最后一个迁移分支保持一致。
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 11;
 
 /// v1：图库、图片、相册、标签、缩略图缓存与键值设置。
 const MIGRATION_V1: &str = r#"
@@ -259,6 +259,37 @@ const MIGRATION_V9: &str = r#"
 UPDATE illust_meta SET missing = 1 WHERE error = '作品不存在或已删除';
 "#;
 
+/// 10. 标签图库：把「一组标签 + 分级」存成侧栏里的一条独立图库。
+///
+/// 存在的理由是把 NSFW 从日常浏览里分出去：`rating` 走 `illust_meta.x_restrict`
+/// （Pixiv 官方分级，不依赖作者有没有打标签），标签走 `illust_tags`。
+///
+/// `tags` 存 JSON 数组而不是单开一张关联表 —— 它只会被整组读出来拼进 SQL，
+/// 从不需要「按标签反查有哪些图库」，为它建表只是徒增一次 JOIN。
+const MIGRATION_V10: &str = r#"
+CREATE TABLE IF NOT EXISTS tag_galleries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    tags       TEXT NOT NULL DEFAULT '[]',
+    rating     INTEGER NOT NULL DEFAULT -1,
+    created_at INTEGER NOT NULL
+);
+"#;
+
+/// 11. 作品的原图宽高，瀑布流排版要用。
+///
+/// **为什么非要落库**：瀑布流每一格的高度 = 列宽 × 高宽比，而滚动条长度是
+/// 「最高那一列有多高」—— 不先把全部高宽比拿到手，总高就算不出来，只能边滚
+/// 边撑，滚动条会一路跳。定高网格没这个问题（行高固定，拿 `total` 就能算），
+/// 这也是它当初不需要这两列的原因。
+///
+/// 允许为空：老库的行由 `artworks::list_aspects` 按缩略图的文件头补齐
+/// （缩略图等比缩放，长宽比与原图一致），补齐之前按中位比例兜底。
+const MIGRATION_V11: &str = r#"
+ALTER TABLE artworks ADD COLUMN width  INTEGER;
+ALTER TABLE artworks ADD COLUMN height INTEGER;
+"#;
+
 pub fn migrate(conn: &Connection) -> AppResult<()> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
@@ -289,8 +320,14 @@ pub fn migrate(conn: &Connection) -> AppResult<()> {
     if version < 9 {
         apply(conn, 9, MIGRATION_V9)?;
     }
+    if version < 10 {
+        apply(conn, 10, MIGRATION_V10)?;
+    }
+    if version < 11 {
+        apply(conn, 11, MIGRATION_V11)?;
+    }
 
-    // 后续迁移在此追加： if version < 10 { apply(conn, 10, MIGRATION_V10)?; }
+    // 后续迁移在此追加： if version < 12 { apply(conn, 12, MIGRATION_V12)?; }
 
     // v3 之前入库的作品行从没登记过扫描根目录。这里反推补一次，同时覆盖两条路径：
     // 「从老库升级上来」以及「库已经停在 v3、但 v3 迁移早于这段逻辑上线」。

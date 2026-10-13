@@ -45,7 +45,22 @@ export interface GridLayout {
 }
 
 /** 格子宽度下限；内容区极窄时不让格子退化成一条线。 */
-const MIN_CELL_WIDTH = 40;
+export const MIN_CELL_WIDTH = 40;
+
+/**
+ * 由内容区宽度推列数。
+ *
+ * **定高网格与瀑布流共用这一份**：两种排版的列数与列宽必须完全一致，
+ * 否则切换排版时格子会忽大忽小 —— 明明只是换了摆放方式，观感却像换了密度。
+ */
+export function columnsFor(contentWidth: number, minColumnWidth: number, gap: number): number {
+  return Math.max(1, Math.floor((contentWidth + gap) / (minColumnWidth + gap)));
+}
+
+/** 把内容区均分成 `columns` 列之后，每列有多宽。 */
+export function columnWidthFor(contentWidth: number, columns: number, gap: number): number {
+  return Math.max(MIN_CELL_WIDTH, (contentWidth - (columns - 1) * gap) / columns);
+}
 
 export function layoutGrid(input: GridInput): GridLayout {
   const {
@@ -60,8 +75,8 @@ export function layoutGrid(input: GridInput): GridLayout {
     overscan,
   } = input;
 
-  const columns = Math.max(1, Math.floor((contentWidth + gap) / (minColumnWidth + gap)));
-  const cellWidth = Math.max(MIN_CELL_WIDTH, (contentWidth - (columns - 1) * gap) / columns);
+  const columns = columnsFor(contentWidth, minColumnWidth, gap);
+  const cellWidth = columnWidthFor(contentWidth, columns, gap);
   const cellHeight = cellWidth * aspect;
   const rowHeight = cellHeight + gap;
   const rowCount = Math.ceil(total / columns);

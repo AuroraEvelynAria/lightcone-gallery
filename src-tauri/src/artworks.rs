@@ -20,6 +20,13 @@ use crate::error::{AppError, AppResult};
 use crate::scanner::{is_supported_image, should_descend};
 use crate::thumbnails::{self, Owner};
 
+/// 作品列表的排序。
+///
+/// **`list_artworks` 与 `list_aspects` 必须用同一句**：瀑布流是拿「第 i 张的比例」
+/// 给「第 i 张作品」排版的，两边顺序一旦漂移，表现就是「格子高度和图对不上」——
+/// 不报错、不崩溃，只是每张卡片的框和内容错位。所以它只能有一个出处。
+pub const ARTWORK_ORDER: &str = "ORDER BY CAST(pid AS INTEGER) DESC, page ASC, id ASC";
+
 /// 从文件名解析 Pixiv 作品号与页码，格式为 `{pid}_p{num}.{ext}`。
 ///
 /// 返回 `None` 表示命名不符合规范，调用方应跳过该文件而不是报错。
@@ -549,8 +556,11 @@ mod tests {
 
         let (width, height) = image::image_dimensions(&thumb).unwrap();
         assert!(
-            width <= 400 && height <= 400 && height > width,
-            "应等比缩放到 400 以内的竖图，实际 {width}x{height}"
+            width <= thumbnails::ARTWORK_SIZE
+                && height <= thumbnails::ARTWORK_SIZE
+                && height > width,
+            "应等比缩放到 {} 以内的竖图，实际 {width}x{height}",
+            thumbnails::ARTWORK_SIZE
         );
         assert!(
             thumb.to_string_lossy().contains("artworks"),
@@ -591,7 +601,7 @@ mod tests {
             calls.fetch_add(1, Ordering::Relaxed);
         };
 
-        let first = generate_thumbnails(&mut conn, &cache, 400, &count).unwrap();
+        let first = generate_thumbnails(&mut conn, &cache, thumbnails::ARTWORK_SIZE, &count).unwrap();
         assert_eq!(first.generated, 3);
         assert_eq!(first.skipped, 0);
         assert_eq!(first.failed, 0);
@@ -612,13 +622,13 @@ mod tests {
         }
 
         // 再跑一次：全部命中缓存，一张都不重算
-        let second = generate_thumbnails(&mut conn, &cache, 400, &count).unwrap();
+        let second = generate_thumbnails(&mut conn, &cache, thumbnails::ARTWORK_SIZE, &count).unwrap();
         assert_eq!(second.generated, 0, "缓存新鲜时不得重复生成");
         assert_eq!(second.skipped, 3);
 
         // 删掉一个缓存文件 -> 下次必须补齐
         std::fs::remove_file(&paths[0]).unwrap();
-        let third = generate_thumbnails(&mut conn, &cache, 400, &count).unwrap();
+        let third = generate_thumbnails(&mut conn, &cache, thumbnails::ARTWORK_SIZE, &count).unwrap();
         assert_eq!(third.generated, 1, "缓存文件缺失应被补齐");
         assert_eq!(third.skipped, 2);
 
@@ -637,7 +647,7 @@ mod tests {
         let cache = make_root("remove-cache");
         let mut conn = open_db();
         scan_folder(&mut conn, &root).unwrap();
-        generate_thumbnails(&mut conn, &cache, 400, &|_, _| {}).unwrap();
+        generate_thumbnails(&mut conn, &cache, thumbnails::ARTWORK_SIZE, &|_, _| {}).unwrap();
 
         let rows: Vec<(i64, String, String)> = {
             let mut stmt = conn
@@ -774,11 +784,273 @@ mod tests {
         // 索引完就把其中一张原图删掉，模拟「盘上文件已消失」
         std::fs::remove_file(root.join("333_p1.jpg")).unwrap();
 
-        let batch = generate_thumbnails(&mut conn, &cache, 400, &|_, _| {}).unwrap();
+        let batch =
+            generate_thumbnails(&mut conn, &cache, thumbnails::ARTWORK_SIZE, &|_, _| {}).unwrap();
         assert_eq!(batch.generated, 1);
         assert_eq!(batch.failed, 1, "缺失的源文件应计入 failed 而不是让 pass 失败");
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&cache);
     }
+
+    /// 瀑布流的比例表：顺序必须与列表一致，没量过的计入 pending，量过的直接用。
+    ///
+    /// 顺序错了不会报错、不会崩，只会让**每张卡片的框和内容错位** ——
+    /// 这是这条链路上唯一一种「静默出错」，所以专门钉一条。
+    #[test]
+    fn scan_aspects_follows_list_order_and_splits_pending() {
+        let root = make_root("aspects");
+        for name in ["300_p0.jpg", "100_p0.jpg", "200_p0.jpg"] {
+            write_image(&root.join(name));
+        }
+
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+
+        // 只有 100 那条已经登记过宽高（竖图 600x1200 → 比例 2.0）
+        conn.execute(
+            "UPDATE artworks SET width = 600, height = 1200 WHERE pid = '100'",
+            [],
+        )
+        .unwrap();
+
+        let scan = scan_aspects(&conn, "", &[]).unwrap();
+        let ids: Vec<i64> = scan.rows.iter().map(|row| row.id).collect();
+
+        // 与列表同序：pid 数值倒序
+        let listed: Vec<i64> = {
+            let mut stmt = conn
+                .prepare(&format!("SELECT id FROM artworks {ARTWORK_ORDER}"))
+                .unwrap();
+            let rows = stmt.query_map([], |row| row.get(0)).unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(ids, listed, "比例表的顺序必须与作品列表一字不差");
+
+        // 按 pid 取，不按下标 —— 顺序本身在上面已经断言过了，这里要验的是取值
+        let aspect_of = |pid: &str| -> f64 {
+            let id: i64 = conn
+                .query_row("SELECT id FROM artworks WHERE pid = ?1", [pid], |row| row.get(0))
+                .unwrap();
+            scan.rows.iter().find(|row| row.id == id).unwrap().aspect()
+        };
+
+        assert_eq!(aspect_of("100"), 2.0, "登记过的那条应直接用库里的宽高");
+        assert_eq!(scan.pending.len(), 2, "另外两条没量过，应计入 pending");
+        assert_eq!(
+            aspect_of("300"),
+            FALLBACK_ASPECT,
+            "还没量到的先用兜底值，不能是 0 或 NaN（那会让整列高成 0）"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 极端长图 / 宽图会被夹到 `[MIN_ASPECT, MAX_ASPECT]`，不让一格吃掉整屏。
+    #[test]
+    fn aspect_is_clamped_for_extreme_shapes() {
+        let root = make_root("clamp");
+        write_image(&root.join("1_p0.jpg"));
+        write_image(&root.join("2_p0.jpg"));
+        write_image(&root.join("3_p0.jpg"));
+
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+        conn.execute("UPDATE artworks SET width = 1000, height = 5000 WHERE pid = '1'", [])
+            .unwrap(); // 1:5 的极端长图
+        conn.execute("UPDATE artworks SET width = 5000, height = 1000 WHERE pid = '2'", [])
+            .unwrap(); // 5:1 的极端宽图
+        conn.execute("UPDATE artworks SET width = 0, height = 0 WHERE pid = '3'", [])
+            .unwrap(); // 脏数据不能让宽高比变成 NaN
+
+        let scan = scan_aspects(&conn, "", &[]).unwrap();
+        let by_pid = |pid: &str| -> f64 {
+            let id: i64 = conn
+                .query_row("SELECT id FROM artworks WHERE pid = ?1", [pid], |row| row.get(0))
+                .unwrap();
+            scan.rows.iter().find(|row| row.id == id).unwrap().aspect()
+        };
+
+        assert_eq!(by_pid("1"), MAX_ASPECT, "1:5 应夹到上限");
+        assert_eq!(by_pid("2"), MIN_ASPECT, "5:1 应夹到下限");
+        assert!(by_pid("3").is_finite() && by_pid("3") > 0.0, "0 宽高的脏数据要走兜底值");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 量到尺寸之后写回库，再读一次就应该是精确值、且不再有 pending。
+    #[test]
+    fn store_dimensions_clears_the_backlog() {
+        let root = make_root("store-dims");
+        write_image(&root.join("9_p0.jpg"));
+
+        let mut conn = open_db();
+        scan_folder(&mut conn, &root).unwrap();
+
+        let scan = scan_aspects(&conn, "", &[]).unwrap();
+        assert_eq!(scan.pending.len(), 1);
+        let (_, id, _) = scan.pending[0];
+
+        assert_eq!(store_dimensions(&mut conn, &[(id, 1200, 800)]).unwrap(), 1);
+
+        let after = scan_aspects(&conn, "", &[]).unwrap();
+        assert!(after.pending.is_empty(), "写回之后不该再有待量的行");
+        assert!((after.rows[0].aspect() - 800.0 / 1200.0).abs() < 1e-9);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+
+/// 瀑布流排版的兜底高宽比（高 / 宽）。
+///
+/// 只在这张图的宽高既没入库、又读不出文件头时用（原图被删、缩略图也没生成出来）。
+/// 取本机 4430 张实测的**中位值 1.38** 向上取整：偏大偏小都会让那一列松紧失真，
+/// 而中位意味着「猜错的代价最小」。
+pub const FALLBACK_ASPECT: f64 = 1.4;
+
+/// 极端长图 / 宽图的夹取范围（高 / 宽），与前端 `masonryGeometry` 的取值一致。
+///
+/// 超出范围的卡片会在框内被 `object-cover` 裁掉一点。本机实测夹到 `[0.5, 2.5]`
+/// 只有 **2.6%** 的作品需要裁 —— 而正方网格是 100% 全裁。
+const MIN_ASPECT: f64 = 0.5;
+const MAX_ASPECT: f64 = 2.5;
+
+/// 一行作品在排版时需要的东西：身份、探针路径（还没量过时用）、已有的尺寸。
+#[derive(Debug, Clone)]
+pub struct AspectRow {
+    pub id: i64,
+    probe: PathBuf,
+    /// 原图像素宽高。`None` 表示还没量过，`aspect()` 会用兜底值。
+    pub size: Option<(i64, i64)>,
+}
+
+impl AspectRow {
+    /// 把刚量到的像素尺寸填进来（写库之外，调用方手里这份也要同步）。
+    pub fn set_size(&mut self, width: u32, height: u32) {
+        self.size = Some((width as i64, height as i64));
+    }
+
+    pub fn aspect(&self) -> f64 {
+        match self.size {
+            Some((width, height)) if width > 0 && height > 0 => {
+                (height as f64 / width as f64).clamp(MIN_ASPECT, MAX_ASPECT)
+            }
+            _ => FALLBACK_ASPECT,
+        }
+    }
+}
+
+/// `scan_aspects` 的产物：比例表 + 还需要补量的那几条。
+#[derive(Debug, Default)]
+pub struct AspectScan {
+    pub rows: Vec<AspectRow>,
+    /// `(在 rows 里的下标, id, 探针路径)`。下标是给调用方回填后原地更新用的
+    /// —— 拿 id 反查在 4430 条上就是 O(n²)。
+    pub pending: Vec<(usize, i64, PathBuf)>,
+}
+
+/// 读出当前筛选下**每一张**作品的尺寸行，顺序与 `list_artworks` 一字不差。
+///
+/// 瀑布流要一次拿到全部比例才算得出滚动条长度（总高 = 最高那一列有多高），
+/// 所以这里刻意不分页 —— 只送 id 与比例时 4430 条约 70KB，一次取完最省事。
+///
+/// **这个函数不碰文件系统**：量文件头是调用方在数据库锁之外做的事。一次回填要
+/// 读几千个文件头，把锁一起攥住会让同期的列表查询白等好几秒。
+pub fn scan_aspects(
+    conn: &Connection,
+    filter: &str,
+    binds: &[rusqlite::types::Value],
+) -> AppResult<AspectScan> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, thumbnail_path, original_path, width, height FROM artworks
+         WHERE 1 = 1{filter} {ARTWORK_ORDER}"
+    ))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+            let thumbnail: Option<String> = row.get(1)?;
+            let original: String = row.get(2)?;
+            Ok(AspectRow {
+                id: row.get(0)?,
+                probe: pick_probe(thumbnail.as_deref(), &original),
+                size: match (row.get::<_, Option<i64>>(3)?, row.get::<_, Option<i64>>(4)?) {
+                    (Some(width), Some(height)) => Some((width, height)),
+                    _ => None,
+                },
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let pending = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.size.is_none())
+        .map(|(index, row)| (index, row.id, row.probe.clone()))
+        .collect();
+
+    Ok(AspectScan { rows, pending })
+}
+
+/// 把量到的像素尺寸写回库，返回写入条数。
+pub fn store_dimensions(conn: &mut Connection, measured: &[(i64, u32, u32)]) -> AppResult<usize> {
+    if measured.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare("UPDATE artworks SET width = ?1, height = ?2 WHERE id = ?3")?;
+        for (id, width, height) in measured {
+            stmt.execute(params![*width as i64, *height as i64, id])?;
+        }
+    }
+    tx.commit()?;
+
+    Ok(measured.len())
+}
+
+/// 量一张图优先读哪个文件。
+///
+/// 缩略图与原件长宽比一致（等比缩放），但它小得多、必然躺在本地缓存目录里，
+/// 读头更快也更可靠。缩略图路径为空时才退回原图。
+fn pick_probe(thumbnail: Option<&str>, original: &str) -> PathBuf {
+    match thumbnail {
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from(original),
+    }
+}
+
+/// 并行读一批图片的像素尺寸，返回与输入同序的结果。
+///
+/// `image::image_dimensions` 只读文件头（单张约 1~3ms），串行跑四千多张仍要好几秒；
+/// 摊到多线程只剩几百毫秒。这一步**只发生一次**（回填完就有值了），
+/// 所以不为它引入任何常驻缓存。
+pub fn measure_dimensions(jobs: &[PathBuf]) -> Vec<Option<(u32, u32)>> {
+    if jobs.is_empty() {
+        return Vec::new();
+    }
+
+    let threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(jobs.len());
+
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let out = std::sync::Mutex::new(vec![None; jobs.len()]);
+
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if index >= jobs.len() {
+                    break;
+                }
+                out.lock().unwrap()[index] = image::image_dimensions(&jobs[index]).ok();
+            });
+        }
+    });
+
+    out.into_inner().unwrap()
 }

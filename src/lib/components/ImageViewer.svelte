@@ -107,8 +107,18 @@
     onrate?: (rating: number) => void;
     /** 加载失败时展示的路径，方便主人自己去磁盘上找 */
     failurePath?: string;
-    /** 原图在磁盘上的路径。给了就在工具条上多一个「复制图片」按钮 */
-    copyPath?: string;
+    /**
+     * **环境光的图片源**，传缩略图（不传就退回用 `src`）。
+     *
+     * 这一层是被 `blur(48px)` 糊开的氛围色，**分辨率再高也看不出差别** ——
+     * 而画面的主体本来就会盖在它上面。可要是让它直接用原图，代价极大：
+     * 本机作品库里 25% 的原图解码后超过 100MB（最大那张 6445×9226 → **227MB**），
+     * 等于开一张图要同时备两份全尺寸位图，外加一个几十 MB 级的高斯模糊。
+     * 真机实测的表现就是**界面卡死**。
+     */
+    ambientSrc?: string;
+    /** 原图在磁盘上的路径。给了就在工具条上多出「复制图片」与「设为壁纸」两个按钮 */
+    originalPath?: string;
   }
 
   let {
@@ -121,7 +131,8 @@
     onfullscreen,
     onrate,
     failurePath,
-    copyPath,
+    ambientSrc,
+    originalPath,
   }: Props = $props();
 
   /** Android 上没有窗口材质/窗口 API，全屏走 HTML Fullscreen API。 */
@@ -867,10 +878,10 @@
 
   /** 把原图写进系统剪贴板。见 `api.copyImage` 的注释（右键菜单那条路走不通）。 */
   async function copyImage(): Promise<void> {
-    if (!copyPath || copyState === "copying") return;
+    if (!originalPath || copyState === "copying") return;
     copyState = "copying";
     try {
-      await api.copyImage(copyPath);
+      await api.copyImage(originalPath);
       copyState = "done";
       setTimeout(() => {
         if (copyState === "done") copyState = "idle";
@@ -881,6 +892,76 @@
       setTimeout(() => {
         if (copyState === "failed") copyState = "idle";
       }, 4000);
+    }
+  }
+
+  /**
+   * 「设为壁纸」的反馈状态。与复制同一个理由：成功失败都要看得见 ——
+   * 系统不认这个图片格式、或者厂商 ROM 不给设锁屏，这两种都会失败，
+   * 静默失败最容易被当成「功能坏了」。
+   */
+  let wallpaperState = $state<"idle" | "setting" | "done" | "failed">("idle");
+  let wallpaperError = $state("");
+  /** 目标选择菜单开着没有（只有手机上有得选）。 */
+  let wallpaperMenuOpen = $state(false);
+
+  /** Windows 桌面：锁屏走 WinRT（`System_UserProfile`），见 `wallpaper.rs`。 */
+  const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+
+  /**
+   * 可以设成哪些壁纸。**三个目标必须先让人选** —— 直接替主人决定「设桌面还是锁屏」
+   * 是不对的，锁屏和桌面在家里是两种观感（一个是自己解锁后看的，一个是别人拿起来
+   * 先看到的）。
+   *
+   * 其余桌面平台（macOS / Linux）留空 = 不弹菜单、点了直接设桌面，因为那两个系统的
+   * 锁屏壁纸实现各是一套，后端还没接。
+   */
+  const WALLPAPER_TARGETS =
+    IS_ANDROID || IS_WINDOWS
+      ? [
+          { id: "home" as const, label: IS_ANDROID ? "桌面" : "桌面壁纸" },
+          { id: "lock" as const, label: "锁屏" },
+          { id: "both" as const, label: "桌面 + 锁屏" },
+        ]
+      : [];
+
+  /**
+   * 点菜单外面关掉它。
+   *
+   * 刻意**不用背幕元素**：工具条带 `backdrop-filter`，那会让它成为 `position: fixed`
+   * 后代的包含块，背幕铺不满屏幕（只盖住工具条）。文档级监听没这个毛病。
+   *
+   * 用 `pointerdown` 而不是 `click`：`click` 要等抬起，中间那段时间菜单还盖着，
+   * 手感发滞。但**必须放行菜单内部的按下** —— 否则 pointerdown 先把菜单拆了，
+   * 随后的 click 落在一个已经不在文档里的节点上，选项永远点不中（这个坑本项目踩过）。
+   */
+  $effect(() => {
+    if (!wallpaperMenuOpen) return;
+    const onOutsideDown = (event: PointerEvent) => {
+      if ((event.target as Element | null)?.closest?.(".viewer__menu")) return;
+      wallpaperMenuOpen = false;
+    };
+    document.addEventListener("pointerdown", onOutsideDown);
+    return () => document.removeEventListener("pointerdown", onOutsideDown);
+  });
+
+  /** 把原图设为壁纸（Android 上由 Kotlin 的 WallpaperManager 接管）。 */
+  async function setWallpaper(target: "home" | "lock" | "both" = "home"): Promise<void> {
+    if (!originalPath || wallpaperState === "setting") return;
+    wallpaperState = "setting";
+    try {
+      await api.setWallpaper(originalPath, target);
+      wallpaperState = "done";
+      setTimeout(() => {
+        if (wallpaperState === "done") wallpaperState = "idle";
+      }, 2000);
+    } catch (err) {
+      wallpaperState = "failed";
+      wallpaperError = String(err);
+      // 失败信息更长，留久一点让人看清原因
+      setTimeout(() => {
+        if (wallpaperState === "failed") wallpaperState = "idle";
+      }, 5000);
     }
   }
 
@@ -973,8 +1054,10 @@
         target?.isContentEditable === true;
 
       if (event.key === "Escape") {
-        // 先退出放大，再退出弹窗 —— 否则放大状态下按 Esc 会直接关掉
-        if (zoomed) resetZoom();
+        // 由内到外逐层退：目标菜单 → 放大 → 弹窗。少了最里面那层的话，
+        // 菜单开着按 Esc 会把整个弹窗关掉，而不是先收菜单
+        if (wallpaperMenuOpen) wallpaperMenuOpen = false;
+        else if (zoomed) resetZoom();
         else onclose();
         return;
       }
@@ -1202,11 +1285,12 @@
         <div class="viewer__stack">
           <div class="viewer__scene">
             <div class="viewer__card">
-              <!-- 环境光：同一张原图糊开，氛围色跟着画走。blur/mask 必须拆
-                   两层（理由见样式表），wrapper 与 img 都是叶子，不压 3D -->
+              <!-- 环境光：糊开当氛围色。blur/mask 必须拆两层（理由见样式表），
+                   wrapper 与 img 都是叶子，不压 3D。用 ambientSrc（缩略图）而不是
+                   原图 —— 理由见 Props 里的说明 -->
               <div class="viewer__ambient-wrap">
                 <img
-                  src={src}
+                  src={ambientSrc ?? src}
                   alt=""
                   aria-hidden="true"
                   draggable="false"
@@ -1313,7 +1397,7 @@
 
       <span class="viewer__divider"></span>
 
-      {#if copyPath}
+      {#if originalPath}
         <button
           type="button"
           class="viewer__tool {copyState === 'done' ? 'is-on' : ''} {copyState === 'failed'
@@ -1345,6 +1429,71 @@
             </svg>
           {/if}
         </button>
+
+        <!-- 设为壁纸。手机上有「桌面 / 锁屏 / 两者」三个目标，点开先选再设；
+             桌面端只有桌面壁纸一个目标，点了直接设（只有一个选项的菜单是干扰） -->
+        <span class="viewer__tool-slot">
+        <button
+          type="button"
+          class="viewer__tool {wallpaperState === 'done' ? 'is-on' : ''} {wallpaperState ===
+          'failed'
+            ? 'is-failed'
+            : ''}"
+          aria-label={wallpaperState === "done" ? "已设为壁纸" : "设为壁纸"}
+          aria-haspopup={WALLPAPER_TARGETS.length > 1 ? "menu" : undefined}
+          aria-expanded={WALLPAPER_TARGETS.length > 1 ? wallpaperMenuOpen : undefined}
+          title={wallpaperState === "done"
+            ? "已设为壁纸"
+            : wallpaperState === "failed"
+              ? `设置壁纸失败：${wallpaperError}`
+              : WALLPAPER_TARGETS.length > 1
+                ? "设为壁纸（可选桌面 / 锁屏）"
+                : "把这张图设为桌面壁纸"}
+          disabled={wallpaperState === "setting"}
+          onclick={() => {
+            if (WALLPAPER_TARGETS.length > 1) wallpaperMenuOpen = !wallpaperMenuOpen;
+            else void setWallpaper();
+          }}
+        >
+          {#if wallpaperState === "done"}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="size-4">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+            </svg>
+          {:else if wallpaperState === "failed"}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z" />
+            </svg>
+          {:else}
+            <!-- 相框/风景图标：一眼看出是「设为桌面背景」而不是别的图片操作 -->
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909M3.75 19.5h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5z"
+              />
+            </svg>
+          {/if}
+        </button>
+
+        {#if wallpaperMenuOpen && WALLPAPER_TARGETS.length > 1}
+          <div class="viewer__menu" role="menu" aria-label="设为壁纸">
+            <p class="viewer__menu-title">设为壁纸</p>
+            {#each WALLPAPER_TARGETS as target (target.id)}
+              <button
+                type="button"
+                role="menuitem"
+                class="viewer__menu-item"
+                onclick={() => {
+                  wallpaperMenuOpen = false;
+                  void setWallpaper(target.id);
+                }}
+              >
+                {target.label}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        </span>
       {/if}
 
       <button
@@ -1776,6 +1925,53 @@
     padding: 0.25rem;
     box-shadow: 0 10px 30px -10px rgb(0 0 0 / 0.6);
     backdrop-filter: blur(12px);
+  }
+
+  /* 「设为壁纸」按钮的插槽：给绝对定位的目标菜单当定位基准 */
+  .viewer__tool-slot {
+    position: relative;
+    display: inline-flex;
+  }
+
+  /* 目标菜单：从工具条**往上**弹 —— 工具条本来就在屏幕底部，往下会被切掉 */
+  .viewer__menu {
+    position: absolute;
+    bottom: calc(100% + 0.5rem);
+    left: 50%;
+    translate: -50% 0;
+    z-index: 41;
+    display: flex;
+    min-width: 9.5rem;
+    flex-direction: column;
+    gap: 0.125rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--tone-line-faint);
+    background: color-mix(in oklab, var(--tone-panel) 96%, transparent);
+    padding: 0.375rem;
+    box-shadow: 0 16px 40px -12px rgb(0 0 0 / 0.7);
+    backdrop-filter: blur(12px);
+  }
+
+  .viewer__menu-title {
+    padding: 0.25rem 0.625rem 0.375rem;
+    font-size: 0.6875rem;
+    color: var(--tone-text-muted);
+  }
+
+  .viewer__menu-item {
+    cursor: pointer;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    font-size: 0.8125rem;
+    color: var(--tone-fg-soft);
+    transition:
+      background-color 0.15s,
+      color 0.15s;
+  }
+  .viewer__menu-item:hover {
+    background: var(--tone-case);
+    color: var(--tone-fg);
   }
 
   .viewer__tool {

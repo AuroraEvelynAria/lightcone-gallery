@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use rusqlite::params;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::db::models::Stats;
 use crate::error::{AppError, AppResult};
@@ -190,6 +190,47 @@ pub async fn copy_image_to_clipboard(app: AppHandle, path: String) -> AppResult<
         .write_image(&tauri::image::Image::new_owned(rgba, width, height))
         .map_err(|err| AppError::Other(format!("写入剪贴板失败: {err}")))?;
     Ok(())
+}
+
+/// 把一张图设为**桌面壁纸**（双端）。
+///
+/// 两端实现完全不同：Windows 走 `SystemParametersInfoW`（见 `crate::wallpaper`），
+/// Android 交给 Kotlin 的 `WallpaperManager`（见 `MediaStoreBridge` 的 `setWallpaper`）。
+///
+/// `target` **只对 Android 有意义**：`home`（默认，桌面）/ `lock`（锁屏）/ `both`。
+/// Windows 没有「锁屏壁纸」这个概念 —— 那是登录界面的背景，普通程序改不了，
+/// 所以传了也忽略。
+///
+/// 解码 / 转码是 CPU 密集的（一张 4000×6000 的图要一两秒），丢到阻塞线程池上，
+/// 与 `copy_image_to_clipboard` 同一个理由：占住 async runtime 会卡住别的命令。
+#[tauri::command]
+pub async fn set_wallpaper(app: AppHandle, path: String, target: Option<String>) -> AppResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        let payload = serde_json::json!({
+            "path": path,
+            // 默认只设桌面：锁屏壁纸在部分 ROM 上不支持，会白弹一次失败
+            "target": target.unwrap_or_else(|| "home".to_string()),
+        });
+        crate::commands::media::call_bridge_with(&app, "setWallpaper", payload).await
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let wanted = crate::wallpaper::Target::parse(target.as_deref());
+        // 转码后的 PNG 落在应用数据目录而不是临时目录：注册表里存的是这个路径，
+        // 重启之后还得读得到
+        let cache_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|err| AppError::Other(format!("取应用数据目录失败: {err}")))?
+            .join("wallpaper");
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::wallpaper::set(std::path::Path::new(&path), &cache_dir, wanted)
+        })
+        .await
+        .map_err(|err| AppError::Other(format!("壁纸任务失败: {err}")))?
+    }
 }
 
 /// Android 全面屏返回手势的最后一站：MainActivity 把系统返回转发给前端，

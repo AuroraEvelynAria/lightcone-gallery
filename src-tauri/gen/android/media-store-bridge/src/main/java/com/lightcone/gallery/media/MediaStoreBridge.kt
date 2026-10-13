@@ -2,6 +2,7 @@ package com.lightcone.gallery.media
 
 import android.Manifest
 import android.app.Activity
+import android.app.WallpaperManager
 import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -313,5 +314,57 @@ class MediaStoreBridge(private val activity: Activity) : Plugin(activity) {
       }
       invoke.resolve(JSObject())
     }
+  }
+
+  /**
+   * 把一张图设为桌面壁纸。
+   *
+   * 用 `setStream` 而不是自己 `BitmapFactory.decodeFile` + `setBitmap`：
+   * 原图动辄 4000×6000，手工解码得先算 `inSampleSize` —— 算小了 OOM，
+   * 算大了壁纸糊。`setStream` 把文件交给系统壁纸服务，由它按壁纸尺寸自己
+   * 解，内存和清晰度都不用我们操心。
+   *
+   * **显式开线程 + 回主线程 resolve**：`setStream` 官方文档写明「可能耗时数秒」，
+   * 而这条命令是从 Rust 侧派发过来的（线程模型取决于 Tauri 的实现，没有保证），
+   * 索性两边都不赌 —— 耗时活儿丢给临时线程，回调用 `runOnUiThread` 兜住。
+   *
+   * `SET_WALLPAPER` 是普通权限（安装即授予），不需要运行时申请。
+   */
+  @Command
+  fun setWallpaper(invoke: Invoke) {
+    val args = org.json.JSONObject(invoke.getRawArgs().toString())
+    val path = args.optString("path", "")
+    val target = args.optString("target", "home")
+
+    val file = File(path)
+    if (path.isEmpty() || !file.isFile) {
+      invoke.reject("图片不存在: $path")
+      return
+    }
+
+    // 默认只设桌面。锁屏壁纸在部分 ROM（尤其厂商定制）上会直接抛
+    // OperationNotAllowedException，不是每个设备都支持
+    val flags = when (target) {
+      "lock" -> WallpaperManager.FLAG_LOCK
+      "both" -> WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+      else -> WallpaperManager.FLAG_SYSTEM
+    }
+
+    Thread {
+      var failure: String? = null
+      try {
+        file.inputStream().use { stream ->
+          WallpaperManager.getInstance(activity).setStream(stream, null, true, flags)
+        }
+      } catch (err: Exception) {
+        // 常见两种：格式系统解不了（WebP 之外的怪格式）、ROM 不给设锁屏
+        failure = err.message ?: err.toString()
+      }
+      val reason = failure
+      activity.runOnUiThread {
+        if (reason == null) invoke.resolve(JSObject())
+        else invoke.reject("设置壁纸失败: $reason")
+      }
+    }.start()
   }
 }

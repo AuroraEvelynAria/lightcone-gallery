@@ -14,10 +14,12 @@ import type {
   CacheUsage,
   Image,
   Library,
+  RatingCounts,
   ScanProgress,
   SortBy,
   Stats,
   Tag,
+  TagGallery,
 } from "./types";
 
 export type Selection =
@@ -40,7 +42,15 @@ export type Selection =
    * 作品库（PID 维度）。它不是 `images` 表的筛选条件，而是把内容区整个
    * 换成作品库视图 —— 与「全部图片 / 收藏」同款的侧栏原地切换。
    */
-  | { kind: "artworks" };
+  | { kind: "artworks" }
+  /**
+   * 标签图库：同样是作品库视图，只是多带了一组筛选条件（标签 + 分级）。
+   *
+   * 条件直接背在身上而不是只存 `id` 再去查表，是因为**内置的「全年龄 / R-18」
+   * 两条压根不在库里**（它们就是 `rating` 一个维度）。带上 `key` 是为了给侧栏
+   * 判断高亮 —— 内置的用 `builtin:*`，自建的用 `custom:<id>`。
+   */
+  | { kind: "tagGallery"; key: string; name: string; tags: string[]; rating: number };
 
 const PAGE_SIZE = 120;
 
@@ -48,6 +58,16 @@ class GalleryStore {
   libraries = $state<Library[]>([]);
   albums = $state<Album[]>([]);
   tags = $state<Tag[]>([]);
+  /**
+   * 用户自建的标签图库。**内置的「全年龄 / R-18」两条不在这里** ——
+   * 它们是 `rating` 一个维度，由 Sidebar 直接拼出来（见 `BUILTIN_GALLERIES`）。
+   */
+  tagGalleries = $state<TagGallery[]>([]);
+  /**
+   * 各分级下的作品条数。侧栏那两条**内置**图库（全年龄 / R-18）要显示数量，
+   * 而它们不落库、拿不到 `count` 列，所以单独数一份。
+   */
+  ratingCounts = $state<RatingCounts | null>(null);
   stats = $state<Stats | null>(null);
   cacheUsage = $state<CacheUsage | null>(null);
 
@@ -189,8 +209,39 @@ class GalleryStore {
     }
   }
 
+  /** 在途的那一页。并发调用共享它，免得两次按同一个 offset 拉同一页。 */
+  #pendingPage: Promise<void> | null = null;
+
   async loadMore(): Promise<void> {
-    if (this.loading || this.loadingMore || !this.hasMore) return;
+    if (this.loading || !this.hasMore) return;
+    // 已经有一页在路上了就**等它**，而不是直接返回。
+    // 早先这里写的是 `|| this.loadingMore` 就直接 return，调用方会以为
+    // 「该加载的已经加载完了」而停下 —— 虚拟网格滚到底就会永远卡在骨架屏。
+    if (this.#pendingPage) return this.#pendingPage;
+    this.#pendingPage = this.#loadNextPage().finally(() => {
+      this.#pendingPage = null;
+    });
+    return this.#pendingPage;
+  }
+
+  /**
+   * 虚拟网格要求「第 `end` 条之前的数据都在手上」，这里负责补到够。
+   *
+   * 与旧版无限滚动的区别：那时靠底部哨兵的 `IntersectionObserver`，滑到哪加载到哪；
+   * 现在是虚拟网格直接报出「我要渲染到第几条」。快速拖到底时会连着补好几页，
+   * 每页之间都让出事件循环，所以界面不会被卡住。
+   */
+  async ensureLoaded(end: number): Promise<void> {
+    while (this.images.length < end && this.hasMore && !this.loading) {
+      const before = this.images.length;
+      await this.loadMore();
+      // 一页下来一条都没多（在途 / 出错 / 到底）就停，免得空转成死循环
+      if (this.images.length === before) return;
+    }
+  }
+
+  async #loadNextPage(): Promise<void> {
+    if (!this.hasMore) return;
     // 不自增代际：loadMore 是当前这轮列表的延续。但落地前要核对 —— 在途期间
     // 若来了一轮新的 refreshImages，本页的偏移量已经失效，拼上去会把旧筛选的
     // 条目混进新列表。
@@ -210,16 +261,39 @@ class GalleryStore {
 
   async refreshSidebar(): Promise<void> {
     try {
-      const [libraries, albums, tags, stats] = await Promise.all([
+      const [libraries, albums, tags, tagGalleries, ratingCounts, stats] = await Promise.all([
         api.listLibraries(),
         api.listAlbums(),
         api.listTags(),
+        api.listTagGalleries(),
+        api.countArtworksByRating(),
         api.stats(),
       ]);
       this.libraries = libraries;
       this.albums = albums;
       this.tags = tags;
+      this.tagGalleries = tagGalleries;
+      this.ratingCounts = ratingCounts;
       this.stats = stats;
+    } catch (err) {
+      this.error = String(err);
+    }
+  }
+
+  /**
+   * 只刷新标签图库相关的数字（自建列表 + 分级计数）。
+   *
+   * 作品库扫描、移除之后调它 —— 那时作品条数变了，但图库 / 相册 / 标签
+   * 一个都没动，没必要把整个侧栏拉一遍。
+   */
+  async refreshTagGalleries(): Promise<void> {
+    try {
+      const [tagGalleries, ratingCounts] = await Promise.all([
+        api.listTagGalleries(),
+        api.countArtworksByRating(),
+      ]);
+      this.tagGalleries = tagGalleries;
+      this.ratingCounts = ratingCounts;
     } catch (err) {
       this.error = String(err);
     }

@@ -21,9 +21,18 @@ use crate::error::{AppError, AppResult};
 pub const ALLOWED_SIZES: &[u32] = &[160, 320, 400, 640];
 pub const DEFAULT_SIZE: u32 = 320;
 
-/// 作品库缩略图的目标边长。Pixiv 作品以插画为主，400 在常见格子尺寸下
-/// 即使按 1.5~2 倍屏缩放也不会糊。
-pub const ARTWORK_SIZE: u32 = 400;
+/// 作品库缩略图的目标边长。
+///
+/// **400 曾经够用，直到手机上出现一列满宽的格子。** 手机屏幕密度普遍到 3.25
+/// （1220×2712 @520dpi），一列铺满时格子的**物理**边长能到 1084px；而卡片是正方
+/// `object-cover` —— 裁切吃的是缩略图的**短边**，400 长边的 3:2 图短边只有 267px，
+/// 等于被放大四倍，肉眼可见地糊。桌面默认窗口下格子约 358 物理像素、
+/// 短边 267 只放大 1.34 倍，所以这个毛病只在手机侧暴露得出来。
+///
+/// 640 是权衡后的取值：手机改两列后格子约 522 物理像素，短边 427 只需放大 1.22 倍
+/// （3.25 的屏密度下已看不出差别）。代价是缓存体积约为 400 的 2.56 倍
+/// —— 实测 4430 张从 91MB 涨到约 207MB，相对原图库可以接受。
+pub const ARTWORK_SIZE: u32 = 640;
 
 /// 渲染线程数上限。再往上收益递减，而且会把 CPU 从 UI 那边抢走。
 const MAX_RENDER_THREADS: usize = 8;
@@ -65,6 +74,23 @@ pub fn thumbnail_path(cache_dir: &Path, owner: Owner, id: i64, size: u32) -> Pat
         .join(format!("{id}.webp"))
 }
 
+/// 库里存的缩略图路径是否指向**当前尺寸**的缓存目录。
+///
+/// 缓存按 `<owner>/<size>/` 分层，所以改动 `ARTWORK_SIZE` 之后，`artworks.thumbnail_path`
+/// 里存的还是旧尺寸的路径 —— 文件确实在、`<img>` 也打得开，只是分辨率不够，
+/// 构造不出任何报错（这正是它危险的地方：不报错，只是糊）。
+///
+/// 判成「不当前」之后由调用方决定怎么办：命令层把它当 `None` 返回，前端就会走一次
+/// 重生成回退（`thumbnail_for_artwork`，那边用的是当前的 `ARTWORK_SIZE`），
+/// 顺手把新尺寸补上并写回库 —— 于是主人滑到哪张补哪张，不必重扫整个库。
+pub fn is_current_size(stored: Option<&str>, size: u32) -> bool {
+    let Some(dir) = stored.map(Path::new).and_then(Path::parent) else {
+        return false;
+    };
+    let wanted = size.to_string();
+    dir.file_name().and_then(|name| name.to_str()) == Some(wanted.as_str())
+}
+
 /// 返回缩略图路径，必要时从原图生成。
 ///
 /// 缓存命中条件是「缩略图存在且不比原图旧」，因此原图被替换后会自动重算。
@@ -89,7 +115,40 @@ pub fn ensure_thumbnail(
     }
     fs::write(&dest, &bytes)?;
 
+    // 新尺寸已经落盘，旧尺寸的那一份从此不会再被读到（列表已经把它的路径判成过期）。
+    // 不删的话换一次尺寸就白留一整份 —— 本机实测 4430 张是 91MB，
+    // 而手机上的空间更金贵。放在这里而不是命令层，是为了让「单张回退」与
+    // 「扫描时的批量生成」两条路都自动收敛，不必各写一遍。
+    remove_other_sizes(cache_dir, owner, id, size);
+
     Ok(dest)
+}
+
+/// 删掉同一个 id 在**别的尺寸目录**下留下的缓存文件，返回删掉几个。
+///
+/// 只认 `<cache>/<owner>/<纯数字>/<id>.webp` 这一种形状：目录名必须能解析成数字、
+/// 文件名必须正好是 `<id>.webp`。任何对不上的都跳过 —— 这个函数会删文件，
+/// 判据就得窄到「手滑也删不到别的东西」（原图根本不在缓存目录下，够不着）。
+pub fn remove_other_sizes(cache_dir: &Path, owner: Owner, id: i64, keep: u32) -> usize {
+    let Ok(entries) = fs::read_dir(cache_dir.join(owner.dir_name())) else {
+        return 0;
+    };
+
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let dir = entry.path();
+        let other = dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.parse::<u32>().ok());
+        if other.is_none() || other == Some(keep) {
+            continue;
+        }
+        if fs::remove_file(dir.join(format!("{id}.webp"))).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 /// 校验源文件存在并生成 / 复用缓存，全程丢到阻塞线程池。
@@ -365,5 +424,186 @@ mod tests {
         assert!(as_image.is_file() && as_artwork.is_file());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 改了 `ARTWORK_SIZE` 之后，库里存的旧尺寸路径必须能被认出来。
+    ///
+    /// 这条判据是「滑到哪张补哪张」整套懒重算的**唯一入口**：判不出来，旧图就永远
+    /// 服务下去（文件在、能打开，只是糊，不会有任何报错）；判得太宽，每次列出一页
+    /// 都会把好端端的缩略图判成缺失、白白重算一遍。
+    #[test]
+    fn current_size_predicate_matches_only_the_active_size_dir() {
+        let old = format!("C:/cache/artworks/{}/1.webp", ARTWORK_SIZE / 2);
+        let current = format!("C:/cache/artworks/{ARTWORK_SIZE}/1.webp");
+
+        assert!(is_current_size(Some(&current), ARTWORK_SIZE), "当前尺寸要认");
+        assert!(!is_current_size(Some(&old), ARTWORK_SIZE), "旧尺寸目录要判过期");
+        assert!(
+            !is_current_size(None, ARTWORK_SIZE),
+            "库里为 NULL 的不能当成命中"
+        );
+        assert!(
+            !is_current_size(Some(""), ARTWORK_SIZE),
+            "空串不能当真：它在 Windows 上会被解析成当前目录，父目录名是随机的"
+        );
+        // 只有目录名参与比较，文件名不该影响结论
+        assert!(is_current_size(
+            Some(&format!("C:/cache/artworks/{ARTWORK_SIZE}/999.webp")),
+            ARTWORK_SIZE
+        ));
+        // 尺寸串出现在路径中间（而非末级目录）不算数，避免用 starts_with 之类的宽判据
+        assert!(
+            !is_current_size(
+                Some(&format!("C:/cache/{ARTWORK_SIZE}/artworks/1.webp")),
+                ARTWORK_SIZE
+            ),
+            "尺寸必须是末级目录 —— 路径里别处撞上同一个数字不算命中"
+        );
+    }
+
+    /// 换尺寸时要顺手把旧尺寸的副本删掉，但**只能删该删的**。
+    ///
+    /// 这个函数会真的删文件，所以判据必须窄：目录名解析不出数字不删、不是当前 id
+    /// 的不删、名字不叫 `<id>.webp` 的不删、别的归属域不碰、当前尺寸本身更不能删。
+    #[test]
+    fn remove_other_sizes_only_touches_the_matching_copy() {
+        let root = scratch("prune");
+        let cache = root.join("cache");
+
+        let write = |relative: &str| {
+            let path = cache.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"x").unwrap();
+            path
+        };
+
+        let stale = write("artworks/400/7.webp");
+        let keep = write("artworks/640/7.webp");
+        let odd_dir = write("artworks/not-a-size/7.webp");
+        let other_id = write("artworks/400/8.webp");
+        let other_ext = write("artworks/400/7.png");
+        let other_owner = write("images/400/7.webp");
+
+        assert_eq!(
+            remove_other_sizes(&cache, Owner::Artwork, 7, 640),
+            1,
+            "只有 artworks/400/7.webp 该被删"
+        );
+
+        assert!(!stale.exists(), "旧尺寸的副本应被删掉");
+        assert!(keep.exists(), "当前尺寸绝不能被删");
+        assert!(odd_dir.exists(), "目录名不解析成数字就跳过，不猜");
+        assert!(other_id.exists(), "别的 id 不能误伤");
+        assert!(other_ext.exists(), "文件名必须正好是 <id>.webp");
+        assert!(other_owner.exists(), "别的归属域不能碰（两张表的 id 会撞车）");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 走一遍真实生成：先出 160 的，再出 320 的，前者应被自动清掉。
+    #[test]
+    fn regenerating_at_another_size_prunes_the_old_copy() {
+        let root = scratch("prune-integration");
+        let cache = root.join("cache");
+
+        let source = root.join("photo.png");
+        image::RgbImage::new(800, 600).save(&source).unwrap();
+
+        let small = ensure_thumbnail(&cache, Owner::Artwork, 3, &source, 160).unwrap();
+        assert!(small.is_file());
+
+        let large = ensure_thumbnail(&cache, Owner::Artwork, 3, &source, 320).unwrap();
+        assert!(large.is_file());
+        assert!(
+            !small.exists(),
+            "升到 320 之后，160 的那份已经无人引用，不该留在盘上"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// 真实图片上的缩略图耗时基准（默认忽略）。
+    ///
+    /// **为什么要分段量**：目标边长不是唯一的成本项 —— 解码原图是大头，而且
+    /// **与目标尺寸无关**（`image` 0.25.10 / zune-jpeg 0.5.15 都没暴露 JPEG 的缩放
+    /// 解码，只能全解一次再缩）。改尺寸只影响「缩放 + 编码」这一段。不把两段分开，
+    /// 就没法判断放大到 640 到底贵多少（也容易被「换尺寸后整轮扫描慢了多少」
+    /// 这种掺了解码的读数带偏）。
+    ///
+    /// 本机 release 实测（40 张 4000px 级的 pixez 原图，8 核）：
+    /// 解码 121ms、渲染 400 共 159ms、渲染 640 共 176ms —— 放大到 640 净增 17.5ms
+    /// （+11%），体积 17.5KB → 34.2KB（×1.95）。值得。
+    ///
+    /// 跑法（指向任意一个装着原图的目录，只读，不写缓存）：
+    /// ```text
+    /// LIGHTCONE_BENCH_DIR="D:/pixez pics/pixez/某位画师" \
+    ///   cargo test --lib bench_real_thumbnails -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "需要真实图库：设 LIGHTCONE_BENCH_DIR 后加 --ignored 跑"]
+    fn bench_real_thumbnails() {
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::var("LIGHTCONE_BENCH_DIR")
+            .expect("请设 LIGHTCONE_BENCH_DIR 指向一个装着原图的目录");
+        let mut sources: Vec<PathBuf> = fs::read_dir(&dir)
+            .expect("读不到该目录")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && matches!(
+                        path.extension()
+                            .and_then(|ext| ext.to_str())
+                            .map(str::to_ascii_lowercase)
+                            .as_deref(),
+                        Some("jpg" | "jpeg" | "png" | "webp")
+                    )
+            })
+            .collect();
+        sources.sort();
+        sources.truncate(40);
+        assert!(!sources.is_empty(), "目录里没有可解码的图片: {dir}");
+
+        let median = |mut samples: Vec<Duration>| -> f64 {
+            samples.sort();
+            samples[samples.len() / 2].as_secs_f64() * 1000.0
+        };
+
+        let (mut decode, mut small, mut large) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut small_bytes, mut large_bytes) = (0usize, 0usize);
+
+        for source in &sources {
+            let started = Instant::now();
+            let _ = image::open(source).expect("样图解不开");
+            decode.push(started.elapsed());
+
+            let started = Instant::now();
+            small_bytes += render(source, 400).expect("渲染失败").len();
+            small.push(started.elapsed());
+
+            let started = Instant::now();
+            large_bytes += render(source, ARTWORK_SIZE).expect("渲染失败").len();
+            large.push(started.elapsed());
+        }
+
+        let count = sources.len() as f64;
+        let decode_ms = median(decode);
+        let small_ms = median(small);
+        let large_ms = median(large);
+        println!("样本 {count} 张（目录 {dir}）");
+        println!("  纯解码原图        {decode_ms:>7.1} ms   ← 与目标尺寸无关，是流水线的大头");
+        println!("  渲染 400          {small_ms:>7.1} ms   ← 含解码");
+        println!("  渲染 {ARTWORK_SIZE}          {large_ms:>7.1} ms   ← 含解码");
+        println!(
+            "  放大到 {ARTWORK_SIZE} 的净增   {:>7.1} ms/张（缩放+编码这一段）",
+            large_ms - small_ms
+        );
+        println!(
+            "  平均体积          400: {:>6.1} KB   {ARTWORK_SIZE}: {:>6.1} KB   （×{:.2}）",
+            small_bytes as f64 / count / 1024.0,
+            large_bytes as f64 / count / 1024.0,
+            large_bytes as f64 / small_bytes as f64
+        );
     }
 }

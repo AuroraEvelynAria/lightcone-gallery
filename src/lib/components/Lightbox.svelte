@@ -35,6 +35,24 @@
     onfiltertag?: (tag: string) => void;
   } = $props();
 
+  /**
+   * 环境光那一层用的缩略图 URL。
+   *
+   * 它被 `blur(48px)` 糊开当氛围色，分辨率再高也看不出差别；可要是让它跟主体
+   * 共用原图，一张 6445×9226 的图就要备两份位图（**单份解码后 227MB**）外加一个
+   * 巨型高斯模糊 —— 电脑上的表现就是界面卡死。列表里没带缩略图地址，所以现取一张 320 的。
+   */
+  let ambientSrc = $state<string | undefined>(undefined);
+  $effect(() => {
+    const id = image.id;
+    ambientSrc = undefined;
+    void api
+      .thumbnailFor(id, 320)
+      .then((path) => (ambientSrc = convertFileSrc(path)))
+      // 取不到就退回用原图，画面照常，只是慢一点
+      .catch(() => (ambientSrc = undefined));
+  });
+
   let detail = $state<ImageDetail | null>(null);
   /** Pixiv 侧的信息（标题 / 画师 / 官方标签）。null 表示这条还没补全过元数据。 */
   let illust = $state<IllustDetailView | null>(null);
@@ -131,7 +149,8 @@
       src={convertFileSrc(image.path)}
       alt={image.filename}
       failurePath={image.path}
-      copyPath={image.path}
+      {ambientSrc}
+      originalPath={image.path}
       {onclose}
       {onnavigate}
       onfullscreen={(value) => (immersive = value)}

@@ -88,10 +88,15 @@ class ThemeStore {
   );
 
   constructor() {
-    // 首帧缓存：同步读、同步落 DOM，页面第一帧就是用户选的样子
-    const scheme = readCache("scheme");
-    const material = readCache("material");
-    const mode = readCache("mode");
+    // 首帧缓存：同步读、同步落 DOM，页面第一帧就是用户选的样子。
+    //
+    // 键必须走 `KEY_*` 常量 —— 写缓存那边是 `#persist(KEY_SCHEME, …)`，落成
+    // `lightcone.theme.scheme`。这里早先写成裸的 `"scheme"`，读的是
+    // `lightcone.scheme`，**读写键对不上，首帧缓存从来没生效过**：冷启动一律
+    // 从硬编码默认值开始，只能等 `init()` 把数据库的值读回来才纠正。
+    const scheme = readCache(KEY_SCHEME);
+    const material = readCache(KEY_MATERIAL);
+    const mode = readCache(KEY_MODE);
     if (isSchemeId(scheme)) this.scheme = scheme;
     if (isMaterialId(material)) this.material = material;
     if (isThemeMode(mode)) this.mode = mode;

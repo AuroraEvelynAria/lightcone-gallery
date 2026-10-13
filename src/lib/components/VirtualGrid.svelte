@@ -23,6 +23,7 @@
     aspect = 1,
     padding = 16,
     overscan = 2,
+    initialIndex = 0,
     onrange,
   }: {
     /** 数据总条数（不是已加载条数）。 */
@@ -38,6 +39,14 @@
     padding?: number;
     /** 视口外额外渲染的行数，抵消快速滚动时的白屏。 */
     overscan?: number;
+    /**
+     * 首次布局后把第几条滚到顶部。
+     *
+     * 切换排版（网格 ↔ 瀑布流）会换掉整个组件，滚动位置自然归零 —— 在几千条里
+     * 翻到一半时被弹回顶部很难受。调用方把「当前看的是第几条」传进来，这里用
+     * 自己的几何算出该滚到哪。之后滚动位置就归组件自己管，不再受这个值影响。
+     */
+    initialIndex?: number;
     /** 可视索引区间变化时回调，用于按需拉数据。 */
     onrange?: (start: number, end: number) => void;
   } = $props();
@@ -82,6 +91,18 @@
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
+  });
+
+  // 首帧定好位置后再跳到 initialIndex —— 量不出高度就算不出该滚多少。
+  // `appliedInitial` 保证只认第一次：之后用户自己滚了，这个值不该再来抢方向。
+  let appliedInitial = false;
+  $effect(() => {
+    const node = scroller;
+    if (!node || appliedInitial || viewportHeight === 0 || layout.rowHeight <= 0) return;
+    appliedInitial = true;
+    if (initialIndex <= 0) return;
+    const row = Math.floor(initialIndex / layout.columns);
+    node.scrollTop = Math.max(0, padding + row * layout.rowHeight - padding);
   });
 
   // 可视区间变化 -> 通知调用方按需取数。虚拟滚动只渲染可见行，

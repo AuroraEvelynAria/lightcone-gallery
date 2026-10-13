@@ -11,6 +11,7 @@ mod pixiv;
 mod scanner;
 mod state;
 mod thumbnails;
+mod wallpaper;
 
 use std::path::Path;
 
@@ -132,6 +133,7 @@ pub fn run() {
             // 阶段一：作品（Pixiv）维度
             commands::scan_artworks_folder,
             commands::list_artworks,
+    commands::list_artwork_aspects,
             // Android：MediaStore 桥（pixez 下图、本应用索引）
             commands::android_scan_media_store,
             commands::android_check_media_permission,
@@ -157,6 +159,14 @@ pub fn run() {
             commands::fetch_all_meta,
             commands::stop_meta_fetch,
             commands::copy_image_to_clipboard,
+            // 设为桌面壁纸（Windows 走 user32 FFI，Android 走 Kotlin 的 WallpaperManager）
+            commands::set_wallpaper,
+            // 标签图库：侧栏里「一组标签 + 一个分级」的独立图库
+            // （内置的「全年龄 / R-18」两条不落库，只有自建的走这三个命令）
+            commands::list_tag_galleries,
+            commands::create_tag_gallery,
+            commands::delete_tag_gallery,
+            commands::count_artworks_by_rating,
             // Android：返回手势的最后一站（MainActivity 转发、前端关闭栈走完才调）
             commands::exit_app,
         ])        .build(tauri::generate_context!())

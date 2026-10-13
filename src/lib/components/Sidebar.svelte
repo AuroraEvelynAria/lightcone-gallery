@@ -3,8 +3,11 @@
   import { cubicOut } from "svelte/easing";
 
   import { api } from "$lib/api";
+  import { artworks } from "$lib/artworks.svelte";
+  import { registerBackCloser } from "$lib/backStack.svelte";
   import { gallery, type Selection } from "$lib/gallery.svelte";
   import { formatBytes } from "$lib/format";
+  import { RATING_ALL_AGES, RATING_NSFW } from "$lib/types";
 
   let {
     open = true,
@@ -34,6 +37,12 @@
 
   const fsPath = $derived(`/storage/emulated/0${currentDir}`);
   const currentName = $derived(currentDir.split("/").pop() ?? "");
+
+  // 选目录面板也是一层浮层：按返回先收它，别一路退到桌面
+  $effect(() => {
+    if (!dirPickerOpen) return;
+    return registerBackCloser(() => (dirPickerOpen = false));
+  });
 
   /** 读当前目录的一层列表：子目录（各带直属图片数）+ 直属图片数。 */
   async function loadDir(): Promise<void> {
@@ -103,7 +112,75 @@
         return current.kind === "pixivTag" && current.tag === target.tag;
       case "artworks":
         return current.kind === "artworks";
+      case "tagGallery":
+        // 比 key 而不是比名字：名字理论上唯一（后端也挡重复），但 key 是
+        // 「内置 / 自建 + id」拼出来的稳定标识，不依赖名字恰好没被改过
+        return current.kind === "tagGallery" && current.key === target.key;
     }
+  }
+
+  /**
+   * 侧栏内置的两条标签图库。
+   *
+   * **不落库**：它们就是 `rating` 这一个维度，落库反而要处理「用户把它删了怎么办」。
+   * 计数从 `gallery.ratingCounts` 现取。
+   */
+  const BUILTIN_GALLERIES: { key: string; name: string; rating: number; hint: string }[] = [
+    {
+      key: "builtin:all-ages",
+      name: "全年龄",
+      rating: RATING_ALL_AGES,
+      hint: "Pixiv 分级为全年龄的作品",
+    },
+    {
+      key: "builtin:nsfw",
+      name: "R-18",
+      rating: RATING_NSFW,
+      hint: "Pixiv 分级为 R-18 / R-18G 的作品（含成人向）",
+    },
+  ];
+
+  /** 内置图库的条数，从分级计数里取。 */
+  function builtinCount(key: string): number | null {
+    const counts = gallery.ratingCounts;
+    if (!counts) return null;
+    return key === "builtin:all-ages" ? counts.allAges : counts.nsfw;
+  }
+
+  /** 点一条图库：换成作品库视图并套上它的条件。 */
+  function selectGallery(item: { key: string; name: string; tags: string[]; rating: number }): void {
+    gallery.select({
+      kind: "tagGallery",
+      key: item.key,
+      name: item.name,
+      tags: item.tags,
+      rating: item.rating,
+    });
+  }
+
+  /** 删掉一条自建图库。只去掉侧栏入口，作品一条都不动。 */
+  async function deleteGallery(id: number): Promise<void> {
+    try {
+      await api.deleteTagGallery(id);
+      // 删掉的正是当前选中的那条 -> 退回作品库，别停在一条已经不存在的图库上
+      if (gallery.selection.kind === "tagGallery" && gallery.selection.key === `custom:${id}`) {
+        gallery.select({ kind: "artworks" });
+      }
+      await gallery.refreshTagGalleries();
+    } catch (err) {
+      gallery.error = String(err);
+    }
+  }
+
+  /**
+   * 「+」：去作品库把筛选条件配好，再点面板里的「存成图库」。
+   *
+   * 不在侧栏里再做一个标签选择器 —— 作品库的筛选面板已经有一份带搜索的
+   * 标签胶囊（2459 个标签），复制一份只会让两处慢慢长歪。
+   */
+  function startNewGallery(): void {
+    gallery.select({ kind: "artworks" });
+    artworks.requestOpenFilter();
   }
 
   async function submitDraft(): Promise<void> {
@@ -227,6 +304,92 @@
         <span>外观</span>
         <span class="count">↗</span>
       </a>
+    </div>
+
+    <!-- 标签图库：内置两条按 Pixiv 分级（全年龄 / R-18），自建的按「标签 + 分级」。
+         存在的理由是把 NSFW 从日常浏览里分出去 —— 主列表行为不变，只是多几个入口 -->
+    <div class="mt-5">
+      <div class="section-head">
+        <span>标签图库</span>
+        <button
+          type="button"
+          class="icon-btn"
+          title="新建：先去作品库把筛选条件配好，再点面板里的「存成图库」"
+          onclick={startNewGallery}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-4">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+          </svg>
+        </button>
+      </div>
+
+      {#each BUILTIN_GALLERIES as item (item.key)}
+        <button
+          type="button"
+          class="sidebar-item"
+          title={item.hint}
+          class:sidebar-item-active={isActive({
+            kind: "tagGallery",
+            key: item.key,
+            name: item.name,
+            tags: [],
+            rating: item.rating,
+          })}
+          onclick={() =>
+            selectGallery({ key: item.key, name: item.name, tags: [], rating: item.rating })}
+        >
+          <span class="truncate">{item.name}</span>
+          <span class="count">{builtinCount(item.key) ?? "…"}</span>
+        </button>
+      {/each}
+
+      {#each gallery.tagGalleries as item (item.id)}
+        <div class="group relative">
+          <button
+            type="button"
+            class="sidebar-item"
+            style="padding-right: 2rem"
+            title={item.tags.length > 0
+              ? `标签：${item.tags.join(" + ")}`
+              : "只按分级筛"}
+            class:sidebar-item-active={isActive({
+              kind: "tagGallery",
+              key: `custom:${item.id}`,
+              name: item.name,
+              tags: item.tags,
+              rating: item.rating,
+            })}
+            onclick={() =>
+              selectGallery({
+                key: `custom:${item.id}`,
+                name: item.name,
+                tags: item.tags,
+                rating: item.rating,
+              })}
+          >
+            <span class="truncate">{item.name}</span>
+            <span class="count">{item.count}</span>
+          </button>
+          <button
+            type="button"
+            class="icon-btn absolute top-1.5 right-1.5 opacity-100 md:opacity-0 md:group-hover:opacity-100"
+            title="删除这条图库（只是去掉侧栏入口，作品一条都不动）"
+            onclick={() => void deleteGallery(item.id)}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="size-3.5">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      {:else}
+        <p class="px-2.5 py-1 text-xs text-muted">还没有自建图库 —— 点右上角 + 去配条件</p>
+      {/each}
+
+      {#if gallery.ratingCounts && gallery.ratingCounts.unknown > 0}
+        <p class="px-2.5 py-1 text-[10px] text-mark">
+          {gallery.ratingCounts.unknown} 条还没抓元数据，两个分级都不算
+        </p>
+      {/if}
     </div>
 
     <!-- 图库：Android 上「+」走 SAF 系统目录选择器（见 gallery.addLibrary 的
