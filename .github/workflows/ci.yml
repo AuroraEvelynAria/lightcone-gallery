@@ -18,15 +18,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 前端这三条都不碰系统库，跑 ubuntu 最便宜也最快
+  # 前端这几步都不碰系统库，跑 ubuntu 最便宜也最快
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 必须 Node 24：`npm test` 靠 Node 原生剥离 TS 类型直接跑 .ts（见 README）。
       # 那个行为要 22.18 / 23.6 起才默认开启，用 runner 自带的旧版本会直接报错。
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -50,7 +50,7 @@ jobs:
   backend:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 不写死版本、跟 stable 走：这个项目没有 nightly 特性，跟 stable 能让
       # 「新编译器把我们弄坏了」早点暴露，而不是等到某天本地升级才发现
