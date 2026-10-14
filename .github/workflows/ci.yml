@@ -1,0 +1,68 @@
+# CI：前端类型检查 + 生产构建 + 两套排版的几何自检 + 后端单元测试。
+#
+# **不构建安装包**。出 APK 要 Android SDK / NDK，宿主要几百 MB 工具链，
+# 而且 release 包必须由持有密钥库的那一方签（见 CONTRIBUTING.md）——
+# 那件事留在本地做。CI 只回答一个问题：**这次改动有没有把 main 弄坏**。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一个分支连着推几次时，把前一次还没跑完的运行取消掉 —— 否则要排队等很久，
+# 而且旧的那次结果没人看
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 前端这三条都不碰系统库，跑 ubuntu 最便宜也最快
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 必须 Node 24：`npm test` 靠 Node 原生剥离 TS 类型直接跑 .ts（见 README）。
+      # 那个行为要 22.18 / 23.6 起才默认开启，用 runner 自带的旧版本会直接报错。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: 类型检查（svelte-check）
+        run: npm run check
+
+      # svelte-check 只看类型，不看「打包能不能过」—— 坏的 import 路径、
+      # PostCSS 认不了的写法它都放过。这一步补上那个缺口。
+      - name: 生产构建（vite build）
+        run: npm run build
+
+      - name: 排版几何自检（定高网格 + 瀑布流）
+        run: npm test
+
+  # 后端跑**真正的目标平台**：`wallpaper.rs` 里 Windows 锁屏那段是
+  # `#[cfg(windows)]` 的，在 ubuntu 上会被整个 cfg 掉 —— 等于没测。
+  # 代价是 Windows runner 慢一些，但公共仓库的 CI 分钟数不计量，换得值。
+  backend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 不写死版本、跟 stable 走：这个项目没有 nightly 特性，跟 stable 能让
+      # 「新编译器把我们弄坏了」早点暴露，而不是等到某天本地升级才发现
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 刻意**不**构建前端：实测 `tauri::generate_context!()` 在 frontendDist
+      # （`../build`）不存在时并不会编译失败，`cargo test --lib` 照样跑完 64 条。
+      # 前端能不能打包由上面那个 job 管，这里只管 Rust。
+      - name: 后端单元测试
+        working-directory: src-tauri
+        run: cargo test --lib

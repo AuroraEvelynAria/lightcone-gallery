@@ -1,5 +1,7 @@
 # LightCone Gallery · 光锥映画
 
+[![CI](https://github.com/AuroraEvelynAria/lightcone-gallery/actions/workflows/ci.yml/badge.svg)](https://github.com/AuroraEvelynAria/lightcone-gallery/actions/workflows/ci.yml)
+
 **本地优先的 Pixiv 图库桌面应用。** 原图留在你自己的目录里、应用只读不写；索引与元数据
 全部存在本机 SQLite；联网只用来补 Pixiv 的标题与标签，而且可选 —— 不填代理，其余功能照常。
 
@@ -145,7 +147,7 @@ npm run tauri:build  # 打包安装包 / 可执行文件
 ```bash
 npm run dev      # 仅启动 Vite（浏览器里调 UI，此时无法调用 Tauri 命令）
 npm run build    # 仅构建前端到 build/
-npm run check    # svelte-check 类型检查
+npm run check    # svelte-check 类型检查（CI 也会跑这条）
 npm test         # 前端自检：两套排版的几何（Node 24 原生跑 TS，未引入测试框架）
 cd src-tauri && cargo test   # 后端测试
 ```
@@ -243,7 +245,7 @@ cd src-tauri && cargo test   # 后端测试
 ## 测试
 
 ```bash
-npm test                      # 前端：两套排版几何共 23 个用例
+npm test                      # 前端：两套排版的几何共 22 个用例（定高网格 10 + 瀑布流 12）
 cd src-tauri && cargo test    # 后端：数据库迁移、去重、画师解析、PID 解析等
 npm run check                 # svelte-check 类型检查
 ```
@@ -307,6 +309,7 @@ npm run tauri -- android build --target aarch64 --debug    # debug，~700MB，�
 | --- | --- |
 | [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md) | 数据库每一版的来由、后端命令一览、关键实现说明、完整的已知限制清单 |
 | [docs/RELEASE.md](docs/RELEASE.md) | 桌面与 Android 的发行清单 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 协作规矩：分支模型、**哪几类改动要先打招呼**（迁移、`gen/android`、出包）、签名与真机验收由谁做 |
 | [docs/SYNC.md](docs/SYNC.md) | 跨设备同步（共用收藏 / 元数据互通）的设计：配对与加密、发现、合并规则、分三期的计划。**尚未实现**，先把结论写下来免得重新推一遍 |
 | `HANDOFF.md` / `HANDOFF-PHASE1.md` | 开发过程中的交接笔记（内部资料，`HANDOFF-PHASE1` 已过期） |
 
@@ -352,4 +355,4 @@ npm run tauri -- android build --target aarch64 --debug    # debug，~700MB，�
 
 ## 许可
 
-`package.json` 里声明的是 MIT，但仓库里**还没有 LICENSE 文件** —— 发行前补上。
+MIT，见仓库根目录的 [LICENSE](LICENSE)，与 `package.json` 的声明一致。

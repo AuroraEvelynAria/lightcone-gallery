@@ -22,7 +22,7 @@
 | 触摸交互 | — | ✅ 捏合缩放 / 单指拖动 / 陀螺仪视差 / 返回手势关闭栈 |
 | 图标 | ⚠️ 文件全套，但**内容都是 Tauri 默认 logo** | ⚠️ mipmap 已生成（5 个密度齐全，同样是默认 logo）；换图标要拿新图重跑 `tauri icon` |
 | 签名 | ⚠️ 无证书，SmartScreen 会拦 | ✅ 已配（走调试密钥库，release 可直接覆盖升级 debug 包） |
-| LICENSE | ❌ 文件缺失（`package.json` 已声明 MIT） | 同左 |
+| LICENSE | ✅ `LICENSE`（MIT，2026-10-11 补于 `d1524c5`，与 `package.json` 一致） | 同左 |
 
 ---
 
