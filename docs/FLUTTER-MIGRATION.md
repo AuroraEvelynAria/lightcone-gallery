@@ -27,6 +27,26 @@ Flutter 的 Skia / Impeller 渲染引擎直接画到画布，不受 WebView 合�
 
 ---
 
+## 一点五、参考项目与选型验证
+
+迁移前调研了两个同类 Flutter 应用的技术栈，验证选型方向并复用成熟方案：
+
+| 模块 | pixez-flutter | Muse | 本项目采用 |
+| --- | --- | --- | --- |
+| 状态管理 | `flutter_riverpod` + `riverpod_generator`（混用 MobX） | Riverpod | **Riverpod 2.x**（与 pixez 一致，确认选型） |
+| 图片查看 | `photo_view` | — | **`photo_view`**（省掉从零写缩放逻辑，见 §5.2） |
+| 瀑布流 | `waterfall_flow` | — | **`waterfall_flow`**（比 flutter_staggered_grid_view 更轻量） |
+| 窗口材质 | `flutter_acrylic` | — | **`flutter_acrylic`**（与 pixez 一致） |
+| 桌面窗口 | `window_manager` + `tray_manager` | — | **`window_manager` + `tray_manager`** |
+| 图片缓存 | `cached_network_image` + `flutter_cache_manager` | — | 本地文件用 `Image.file`，缓存策略参考 `flutter_cache_manager` |
+| 数据库 | `sqflite` + `sqflite_common_ffi` | Room | 仍由 Rust 管理（不重复造轮子） |
+| 下拉刷新 | `easy_refresh` | — | `easy_refresh`（可选，后续阶段评估） |
+
+**关键收益**：`photo_view` 是经过大量项目验证的图片查看组件，原生支持缩放、平移、
+双指捏合、双击放大。用它打底 `ViewerCore`，阶段 3 工时从 2 周压到 1-1.5 周。
+
+---
+
 ## 二、目标技术栈
 
 | 层 | 现有 | 迁移后 |
@@ -321,8 +341,22 @@ GridView.builder(
 )
 ```
 
-**瀑布流**：Flutter 没有内置瀑布流，用 `flutter_staggered_grid_view` 的
-`MasonryGridView.count`，同样是虚拟化的。高宽比从 `aspects()` 里取。
+**瀑布流**：用 `waterfall_flow`（pixez 同款，更轻量），`WaterfallFlow.count`
+同样是虚拟化的。高宽比从 `aspects()` 里取。
+
+```dart
+WaterfallFlow.count(
+  crossAxisCount: columns,
+  crossAxisSpacing: gap,
+  mainAxisSpacing: gap,
+  itemCount: total,
+  itemBuilder: (context, index) {
+    final artwork = ref.watch(artworksProvider).at(index);
+    if (artwork == null) return const SkeletonCard();
+    return ArtworkCard(artwork: artwork);
+  },
+)
+```
 
 **保留阅读位置**：现有用 `initialIndex` 记录「当前看的是第几条」。Flutter 端用
 `ScrollController.initialScrollOffset` 或 `PageStorageKey` 保存滚动位置。
@@ -346,10 +380,16 @@ Flutter 端的实现策略：
 Flutter 的 `Transform` 支持 `Matrix4` 做 3D 变换（`setEntry(3, 2, 0.001)` 加透视）。
 倾斜用 `Matrix4.rotationX` / `rotationY`，扫光用 `ShaderMask` 或自定义 `Painter`。
 
-**缩放 / 平移**：用 `InteractiveViewer`（Flutter 内置），它原生支持缩放、平移、
-双指捏合，且性能优秀。但 `InteractiveViewer` 的缩放锚点是中心，要实现「滚轮锚在
-光标下」需要自定义 `TransformationController`，在 `onInteractionUpdate` 里
-根据光标位置调整 `transformation`。
+**缩放 / 平移**：用 `photo_view`（pixez 同款，成熟方案），它原生支持缩放、平移、
+双指捏合、双击放大，性能经过大量项目验证。**不需要自己写 `InteractiveViewer` 的
+缩放锚点逻辑**，大幅降低阶段 3 工时。
+
+`photo_view` 的 `customSize` + `scaleStateController` 可以精确控制缩放范围和状态；
+`onScaleEnd` 回调可以实现「缩到接近 1 弹回适应窗口」（对应现有 `PINCH_RESET_SCALE`）。
+
+滚轮锚点：`photo_view` 桌面端默认滚轮缩放锚在中心，要实现「锚在光标下」需要
+监听 `PointerSignalEvent`，在 `scaleStateController.scaleState` 里根据光标位置
+调整位移——这比从零写 `InteractiveViewer` 简单得多。
 
 **手势**：`InteractiveViewer` 处理了缩放和平移，但滑动切图 / 下滑关闭需要
 叠加 `GestureDetector`。注意手势竞争（`GestureArena`）——捏合时不能触发滑动。
@@ -440,15 +480,15 @@ Flutter 端用 `showModalBottomSheet` 或自定义 `SlideTransition` 实现。
 
 **交付物**：可以浏览、搜索、筛选、收藏图片，但还没有查看器
 
-### 阶段 3：图片查看器（2 周）
+### 阶段 3：图片查看器（1-1.5 周）
 
 **目标**：检视弹窗功能完整，交互流畅。
 
 **任务**：
-1. `ViewerCore`：`InteractiveViewer` 缩放平移 + 双击铺满 + 滚轮锚点
+1. `ViewerCore`：基于 `photo_view` 的缩放平移 + 双击铺满 + 滚轮锚点
 2. `ViewerEffects`：光锥视差 + 鼠标倾斜 + 扫光（桌面）
 3. 重力感应（手机）
-4. 触屏手势：双指捏合、滑动切图、下滑关闭
+4. 触屏手势：双指捏合（`photo_view` 原生）、滑动切图、下滑关闭
 5. 全屏、复制图片、设为壁纸
 6. 键盘快捷键（Esc / ←→ / +- / 0 / 数字键评分 / F）
 
@@ -492,10 +532,10 @@ Flutter 端用 `showModalBottomSheet` 或自定义 `SlideTransition` 实现。
 | 阶段 0 技术验证 | 1 周 | 关键风险验证 |
 | 阶段 1 数据层 + 状态层 | 2 周 | 50+ 命令迁移 + 3 个 provider |
 | 阶段 2 核心浏览 | 3 周 | 两套虚拟滚动 + 筛选 + 侧栏 |
-| 阶段 3 图片查看器 | 2 周 | 最复杂的模块，手势 + 3D 视差 |
+| 阶段 3 图片查看器 | 1-1.5 周 | `photo_view` 打底，手势 + 3D 视差 |
 | 阶段 4 完善功能 | 2 周 | 相册 / 标签 / 元数据 / 外观 |
 | 阶段 5 优化打磨 | 1 周 | profiling + 真机验收 |
-| **合计** | **11 周** | 约 2.5 个月（单人） |
+| **合计** | **10-10.5 周** | 约 2.5 个月（单人） |
 
 **不确定因素**：
 - FRB 对 Rust 复杂类型（嵌套 struct、enum、Result）的支持可能有坑，阶段 1 可能 +1 周
